@@ -464,13 +464,14 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
       <!-- 添加/编辑账号 -->
       <div class="account-card" style="max-width:600px;margin-bottom:16px">
         <h3 id="accountFormTitle">➕ 添加 / 编辑账号</h3>
+        <p style="font-size:12px;color:var(--text3);margin-bottom:12px">⚠️ 以下为拼多多抢券凭证（Token/Cookie），不是登录密码</p>
         <div class="form-group">
-          <label class="form-label">Access Token</label>
+          <label class="form-label">Access Token <span style="color:var(--text3);font-weight:normal">(PDDAccessToken，必填)</span></label>
           <input class="form-input" id="inputToken" type="text" placeholder="粘贴 PDDAccessToken 的值">
         </div>
         <div class="form-group">
-          <label class="form-label">User ID</label>
-          <input class="form-input" id="inputUserId" type="text" placeholder="pdd_user_id (可选，自动提取)">
+          <label class="form-label">PDD User ID <span style="color:var(--text3);font-weight:normal">(数字ID，如5245009499192，可选，自动提取)</span></label>
+          <input class="form-input" id="inputUserId" type="text" placeholder="从 Cookie 的 pdd_user_id 字段自动获取，一般无需手动填">
         </div>
         <div class="form-group">
           <label class="form-label">完整 Cookie 字符串 (可选)</label>
@@ -505,6 +506,29 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
           <div style="color:var(--text3);padding:20px;text-align:center">加载中...</div>
         </div>
       </div>
+
+      <!-- 登录账号管理 -->
+      <div class="account-card" style="margin-top:16px;max-width:600px;background:linear-gradient(135deg,#fef2f2,#fff7ed)">
+        <h3>🔐 登录面板账号管理</h3>
+        <p style="font-size:12px;color:var(--text3);margin-bottom:12px">修改 Web 面板的登录用户名和密码（不是拼多多账号）</p>
+        <div id="loginInfoBox" style="padding:10px 14px;background:white;border-radius:8px;border:1px solid var(--border);margin-bottom:12px;font-size:13px">
+          当前登录账号: <strong id="currentLoginUser">加载中...</strong>
+        </div>
+        <div class="form-group">
+          <label class="form-label">新用户名（可选，不改则留空）</label>
+          <input class="form-input" id="newLoginUser" type="text" placeholder="新的登录用户名，如 admin2">
+        </div>
+        <div class="form-group">
+          <label class="form-label">新密码</label>
+          <input class="form-input" id="newLoginPwd" type="password" placeholder="新密码（至少4位）">
+        </div>
+        <div class="form-group">
+          <label class="form-label">当前密码确认</label>
+          <input class="form-input" id="oldLoginPwdConfirm" type="password" placeholder="输入当前密码以确认身份">
+        </div>
+        <button class="btn btn-primary" onclick="changeLoginCredentials()">🔑 修改登录凭证</button>
+        <div id="loginCredResult" style="display:none;margin-top:12px"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -533,6 +557,13 @@ document.querySelectorAll('.nav-item').forEach(item => {
     const el = document.getElementById('page-' + page);
     if (el) el.classList.add('active');
     document.getElementById('pageTitle').textContent = PAGE_TITLES[page] || '控制面板';
+    // 切换到账号页时加载登录用户名
+    if (page === 'account') {
+      fetch('/api/login-username').then(r => r.json()).then(d => {
+        const el = document.getElementById('currentLoginUser');
+        if (el) el.textContent = d.username || '(未知)';
+      }).catch(() => {});
+    }
   });
 });
 
@@ -671,6 +702,40 @@ async function logout() {
   if (!confirm('确定退出登录？')) return;
   await fetch('/api/logout', { method:'POST' });
   window.location.href = '/login';
+}
+
+async function changeLoginCredentials() {
+  const oldPw = document.getElementById('oldLoginPwdConfirm').value;
+  const newPw = document.getElementById('newLoginPwd').value;
+  const newUser = document.getElementById('newLoginUser').value.trim();
+  if (!oldPw) { showToast('请输入当前密码确认身份', 'error'); return; }
+  if (!newPw && !newUser) { showToast('至少要修改用户名或密码', 'error'); return; }
+  try {
+    const r = await fetch('/api/change-password', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({old_password: oldPw, new_password: newPw || undefined, new_username: newUser || undefined})
+    });
+    const d = await r.json();
+    const el = document.getElementById('loginCredResult');
+    el.style.display = 'block';
+    if (d.success) {
+      el.innerHTML = '<span style="color:green">✅ 登录凭证已更新！下次登录请使用新凭证。</span>';
+      // 刷新显示
+      fetch('/api/login-username').then(r2 => r2.json()).then(d2 => {
+        document.getElementById('currentLoginUser').textContent = d2.username || '(未知)';
+      });
+      document.getElementById('oldLoginPwdConfirm').value = '';
+      document.getElementById('newLoginPwd').value = '';
+      document.getElementById('newLoginUser').value = '';
+    } else {
+      el.innerHTML = '<span style="color:red">❌ ' + (d.error||'修改失败') + '</span>';
+    }
+  } catch(e) {
+    const el = document.getElementById('loginCredResult');
+    el.style.display = 'block';
+    el.innerHTML = '<span style="color:red">❌ 请求失败: '+e.message+'</span>';
+  }
 }
 
 // === Account Functions ===

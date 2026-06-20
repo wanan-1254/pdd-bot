@@ -123,6 +123,11 @@ def register_auth_routes(app):
         """Railway 健康检查"""
         return jsonify({"status": "ok"})
 
+    @app.route("/api/login-username")
+    def api_login_username():
+        """返回当前登录用户名"""
+        return jsonify({"username": get_username()})
+
     @app.before_request
     def _check_auth():
         """全局鉴权：保护除白名单外的所有路由"""
