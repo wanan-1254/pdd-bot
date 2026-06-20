@@ -802,45 +802,64 @@ function tickCountdown() {
 requestAnimationFrame(tickCountdown);
 
 // === Log Scroll Control ===
-let _userScrolledLog = false;
-function onLogScroll(el) {
-  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
-  _userScrolledLog = !atBottom;
-  if (atBottom) {
-    document.getElementById('autoFollowLogs').checked = true;
-  }
-}
-function onLogScrollFull(el) {
-  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
-  if (atBottom) document.getElementById('autoFollowLogsFull').checked = true;
-}
+let _lastLogCount = 0;
+let _logScrollLocked = false; // 用户手动滚动时锁定
 
-function updateLogs(logs) {
-  const el = document.getElementById('logList');
-  document.getElementById('logCount').textContent = `(${logs.length}条)`;
-  const logCountFull = document.getElementById('logCountFull');
-  if (logCountFull) logCountFull.textContent = `(${logs.length}条)`;
-  const html = logs.length ? logs.slice().reverse().map(l => `
+function makeLogHtml(logs) {
+  if (!logs.length) return '<div style="text-align:center;color:var(--text3);padding:40px">暂无日志</div>';
+  return logs.slice().reverse().map(l => `
     <div class="log-item">
       <span class="log-time">${l.time}</span>
       <span class="log-tag ${l.module}">${l.module}</span>
       <span class="log-msg log-level-${l.level}">${l.message}</span>
     </div>
-  `).join('') : '<div style="text-align:center;color:var(--text3);padding:40px">暂无日志</div>';
-  el.innerHTML = html;
+  `).join('');
+}
+
+// 滚动事件：用户滚到底部时自动勾选"跟随最新"
+function onLogScroll(el) {
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+  if (atBottom) { const c=document.getElementById('autoFollowLogs');if(c)c.checked=true; }
+}
+function onLogScrollFull(el) {
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+  if (atBottom) document.getElementById('autoFollowLogsFull').checked=true;
+}
+
+function updateLogs(logs) {
+  const el = document.getElementById('logList');
   const logFull = document.getElementById('logListFull');
-  if (logFull) {
-    logFull.innerHTML = html;
-    // 只在"跟随最新"开启时自动滚动
-    if (document.getElementById('autoFollowLogsFull').checked) {
-      logFull.scrollTop = logFull.scrollHeight;
+  document.getElementById('logCount').textContent = `(${logs.length}条)`;
+  const lcFull = document.getElementById('logCountFull');
+  if (lcFull) lcFull.textContent = `(${logs.length}条)`;
+
+  const html = makeLogHtml(logs);
+
+  // 判断是否需要跟随（两个日志区域共用一个状态）
+  const follow = document.getElementById('autoFollowLogs')?.checked || document.getElementById('autoFollowLogsFull')?.checked;
+
+  for (const target of [el, logFull]) {
+    if (!target) continue;
+    const wasAtBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 30;
+
+    target.innerHTML = html;
+
+    // 只在"跟随最新"开启 或 原本就在底部时 自动滚到底部
+    if (follow || wasAtBottom) {
+      target.scrollTop = target.scrollHeight;
     }
   }
-  // 概览页也只在"跟随最新"开启时自动滚动
-  if (document.getElementById('autoFollowLogs').checked) {
-    el.scrollTop = el.scrollHeight;
-  }
+
+  _lastLogCount = logs.length;
 }
+
+// "跟随最新"两个复选框联动
+document.addEventListener('DOMContentLoaded', function() {
+  const chk1 = document.getElementById('autoFollowLogs');
+  const chk2 = document.getElementById('autoFollowLogsFull');
+  if (chk1) chk1.addEventListener('change', function() { if(chk2)chk2.checked=this.checked; });
+  if (chk2) chk2.addEventListener('change', function() { if(chk1)chk1.checked=this.checked; });
+});
 
 function updateHistory(list) {
   const el = document.getElementById('historyList');

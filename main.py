@@ -453,8 +453,10 @@ def run_grab_session():
                     results.append(result)
                     total_requests[0] += 1
                 if count % 5 == 0:
+                    # 提取返回内容摘要
+                    data_str = json.dumps(data, ensure_ascii=False)[:120]
                     logger.info(f"[线程-{thread_id}] #{count} ({elapsed:.0f}ms): "
-                                f"status={resp.status_code}")
+                                f"status={resp.status_code} | {data_str}")
             except Exception as e:
                 elapsed = (time.time() - t0) * 1000
                 with results_lock:
