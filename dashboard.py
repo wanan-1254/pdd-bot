@@ -11,6 +11,7 @@ from datetime import datetime, timezone, timedelta
 from collections import deque
 
 from flask import Flask, jsonify, request, Response
+from auth import login_required, register_auth_routes, get_secret_key, get_username
 
 # ============================================================
 # 全局状态 & 日志
@@ -84,6 +85,10 @@ def add_history(success: bool, detail: str):
 # Flask App
 # ============================================================
 app = Flask(__name__)
+app.secret_key = get_secret_key()
+
+# 注册鉴权路由
+register_auth_routes(app)
 
 DASHBOARD_HTML = r"""
 <!DOCTYPE html>
@@ -418,6 +423,28 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
         <div class="config-row"><span class="config-key">THREAD_COUNT</span><span class="config-val">并发线程数 (持续发送)</span></div>
         <div class="config-row"><span class="config-key">PORT</span><span class="config-val">Web 面板端口</span></div>
       </div>
+
+      <!-- 安全设置 -->
+      <div style="margin-top:16px;padding:16px;background:var(--card);border:1px solid var(--border);border-radius:12px">
+        <h3 style="margin-bottom:12px">🔒 安全设置 · 修改密码</h3>
+        <div class="form-group">
+          <label class="form-label">当前密码</label>
+          <input class="form-input" id="pwdOld" type="password" placeholder="输入当前密码" style="max-width:300px">
+        </div>
+        <div class="form-group">
+          <label class="form-label">新密码</label>
+          <input class="form-input" id="pwdNew" type="password" placeholder="新密码（至少4位）" style="max-width:300px" oninput="document.getElementById('pwdConfirm').pattern=this.value.replace(/[.*+?^${}()|[\]\\\\]/g,'\\\\$&')">
+        </div>
+        <div class="form-group">
+          <label class="form-label">确认新密码</label>
+          <input class="form-input" id="pwdConfirm" type="password" placeholder="再次输入新密码" style="max-width:300px">
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" onclick="changePassword()">🔒 修改密码</button>
+          <button class="btn btn-danger" onclick="logout()" style="margin-left:10px">🚪 退出登录</button>
+        </div>
+        <div id="pwdResult" style="display:none;margin-top:12px"></div>
+      </div>
     </div>
 
     <!-- PAGE: 账号 -->
@@ -601,6 +628,38 @@ async function testGrab() {
     if (d.success) showToast('🚀 抢券已触发！请查看日志', 'success');
     else showToast('触发失败: ' + (d.error||''), 'error');
   } catch(e) { showToast('请求失败: '+e.message, 'error'); }
+}
+
+// === Auth & Security ===
+async function changePassword() {
+  const oldPw = document.getElementById('pwdOld').value;
+  const newPw = document.getElementById('pwdNew').value;
+  const confirm = document.getElementById('pwdConfirm').value;
+  if (!oldPw || !newPw) { showToast('请填写所有密码字段', 'error'); return; }
+  if (newPw.length < 4) { showToast('新密码至少4位', 'error'); return; }
+  if (newPw !== confirm) { showToast('两次新密码不一致', 'error'); return; }
+  try {
+    const r = await fetch('/api/change-password', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({old_password:oldPw, new_password:newPw})
+    });
+    const d = await r.json();
+    if (d.success) {
+      showToast('✅ 密码修改成功', 'success');
+      document.getElementById('pwdOld').value = '';
+      document.getElementById('pwdNew').value = '';
+      document.getElementById('pwdConfirm').value = '';
+    } else {
+      showToast('❌ ' + (d.error||'修改失败'), 'error');
+    }
+  } catch(e) { showToast('请求失败: '+e.message, 'error'); }
+}
+
+async function logout() {
+  if (!confirm('确定退出登录？')) return;
+  await fetch('/api/logout', { method:'POST' });
+  window.location.href = '/login';
 }
 
 // === Account Functions ===
@@ -802,11 +861,13 @@ setInterval(poll, 2000);
 
 
 @app.route("/")
+@login_required
 def index():
     return Response(DASHBOARD_HTML, content_type="text/html; charset=utf-8")
 
 
 @app.route("/api/state")
+@login_required
 def api_state():
     # Load token data for account page
     token_data = {}
@@ -842,6 +903,7 @@ def api_state():
 # API: 保存配置
 # ============================================================
 @app.route("/api/config", methods=["POST"])
+@login_required
 def api_save_config():
     try:
         data = request.get_json()
@@ -893,6 +955,7 @@ _grab_thread = None
 
 
 @app.route("/api/test-grab", methods=["POST"])
+@login_required
 def api_test_grab():
     """立即触发一次抢券 (跳过时间等待)"""
     global _grab_thread
@@ -924,6 +987,7 @@ def api_test_grab():
 # API: 清除日志 / 历史
 # ============================================================
 @app.route("/api/clear-logs", methods=["POST"])
+@login_required
 def api_clear_logs():
     LOGS.clear()
     add_log("info", "系统", "日志已清除")
@@ -931,6 +995,7 @@ def api_clear_logs():
 
 
 @app.route("/api/clear-history", methods=["POST"])
+@login_required
 def api_clear_history():
     HISTORY.clear()
     STATE["total_grabs"] = 0
@@ -950,6 +1015,7 @@ def _load_token_file():
 
 
 @app.route("/api/account", methods=["POST"])
+@login_required
 def api_save_account():
     try:
         data = request.get_json()
@@ -1004,6 +1070,7 @@ def api_save_account():
 
 
 @app.route("/api/account", methods=["DELETE"])
+@login_required
 def api_clear_account():
     try:
         token_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pdd_token")
@@ -1022,6 +1089,7 @@ def api_clear_account():
 # API: 测试 Cookie
 # ============================================================
 @app.route("/api/test-cookie", methods=["POST"])
+@login_required
 def api_test_cookie():
     try:
         import requests as req
