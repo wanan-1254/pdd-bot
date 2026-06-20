@@ -1,0 +1,34 @@
+[phases.setup]
+nixPkgs = ["python311", "nodejs_20", "gcc"]
+
+[phases.install]
+cmds = [
+  "python -m venv --copies /opt/venv",
+  ". /opt/venv/bin/activate",
+  "pip install --upgrade pip",
+  "pip install -r requirements.txt"
+]
+
+[start]
+cmd = "python main.py"
+[phases.setup]
+nixPkgs = ["python311", "gcc"]
+aptPkgs = [
+  "libnss3", "libatk1.0-0", "libatk-bridge2.0-0",
+  "libcups2", "libdrm2", "libxkbcommon0", "libxcomposite1",
+  "libxdamage1", "libxrandr2", "libgbm1", "libpango-1.0-0",
+  "libcairo2", "libasound2", "libxshmfence1",
+  "fonts-wqy-zenhei", "fonts-noto-cjk"
+]
+
+[phases.install]
+cmds = [
+  "python -m venv --copies /opt/venv",
+  ". /opt/venv/bin/activate",
+  "pip install --upgrade pip",
+  "pip install -r requirements.txt",
+  "playwright install chromium"
+]
+
+[start]
+cmd = "HEADLESS=true python main.py"
