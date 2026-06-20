@@ -867,8 +867,7 @@ function tickCountdown() {
 requestAnimationFrame(tickCountdown);
 
 // === Log Scroll Control ===
-let _lastLogCount = 0;
-let _logScrollLocked = false; // 用户手动滚动时锁定
+let _lastLogHtml = '';
 
 function makeLogHtml(logs) {
   if (!logs.length) return '<div style="text-align:center;color:var(--text3);padding:40px">暂无日志</div>';
@@ -881,14 +880,16 @@ function makeLogHtml(logs) {
   `).join('');
 }
 
-// 滚动事件：用户滚到底部时自动勾选"跟随最新"
+// 滚动事件：用户往上滚→取消跟随；滚到底部→恢复跟随
 function onLogScroll(el) {
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
-  if (atBottom) { const c=document.getElementById('autoFollowLogs');if(c)c.checked=true; }
+  const c = document.getElementById('autoFollowLogs');
+  if (c) c.checked = atBottom;
 }
 function onLogScrollFull(el) {
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
-  if (atBottom) document.getElementById('autoFollowLogsFull').checked=true;
+  const c = document.getElementById('autoFollowLogsFull');
+  if (c) c.checked = atBottom;
 }
 
 function updateLogs(logs) {
@@ -900,22 +901,30 @@ function updateLogs(logs) {
 
   const html = makeLogHtml(logs);
 
-  // 判断是否需要跟随（两个日志区域共用一个状态）
-  const follow = document.getElementById('autoFollowLogs')?.checked || document.getElementById('autoFollowLogsFull')?.checked;
+  // 如果内容没变就不刷新（避免无意义重绘）
+  if (html === _lastLogHtml) return;
+  _lastLogHtml = html;
 
   for (const target of [el, logFull]) {
     if (!target) continue;
-    const wasAtBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 30;
+    // 保存滚动状态
+    const oldScrollHeight = target.scrollHeight;
+    const oldScrollTop = target.scrollTop;
+    const wasAtBottom = oldScrollHeight - oldScrollTop - target.clientHeight < 30;
 
+    // 只追加新内容，不全量替换
     target.innerHTML = html;
 
-    // 只在"跟随最新"开启 或 原本就在底部时 自动滚到底部
-    if (follow || wasAtBottom) {
+    // 恢复或滚动
+    if (wasAtBottom) {
+      // 原本在底部 → 跟随到新底部
       target.scrollTop = target.scrollHeight;
+    } else {
+      // 不在底部 → 保持原位置（按比例恢复）
+      const newScrollHeight = target.scrollHeight;
+      target.scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight);
     }
   }
-
-  _lastLogCount = logs.length;
 }
 
 // "跟随最新"两个复选框联动
