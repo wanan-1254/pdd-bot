@@ -615,6 +615,24 @@ def main():
     STATE["time_source"] = TIME_SOURCE
     STATE["pdd_offset_ms"] = PDD_OFFSET * 1000
 
+    # ============================================================
+    # Railway 自保活：每 3 分钟 ping /health，防止容器休眠
+    # ============================================================
+    def _keepalive():
+        import requests as _req
+        port = int(os.environ.get("PORT", 8080))
+        while True:
+            time.sleep(180)
+            try:
+                _req.get(f"http://127.0.0.1:{port}/health", timeout=5)
+                logger.debug("保活心跳: ok")
+            except Exception:
+                pass
+
+    _ka = threading.Thread(target=_keepalive, daemon=True)
+    _ka.start()
+    logger.info("保活线程已启动 (每180s心跳)")
+
     # 测试模式: 设置抢券时间为当前时间 +5 秒
     if os.getenv("RUN_TEST", "false").lower() == "true":
         now = now_bjt()
