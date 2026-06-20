@@ -337,9 +337,14 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
         <div class="big-card">
           <h3 style="display:flex;justify-content:space-between;align-items:center">
             <span>📋 运行日志 <span style="font-size:12px;color:var(--text3);font-weight:normal" id="logCount">(0条)</span></span>
-            <button class="btn btn-outline" style="padding:4px 12px;font-size:12px" onclick="clearLogs()">🗑 清除</button>
+            <div style="display:flex;gap:6px;align-items:center">
+              <label style="font-size:12px;color:var(--text2);cursor:pointer;display:flex;align-items:center;gap:4px">
+                <input type="checkbox" id="autoFollowLogs" checked> 跟随最新
+              </label>
+              <button class="btn btn-outline" style="padding:4px 12px;font-size:12px" onclick="clearLogs()">🗑 清除</button>
+            </div>
           </h3>
-          <div class="log-list" id="logList" style="max-height:350px;overflow-y:auto">
+          <div class="log-list" id="logList" onscroll="onLogScroll(this)" style="max-height:350px;overflow-y:auto">
             <div style="text-align:center;color:var(--text3);padding:40px">加载中...</div>
           </div>
         </div>
@@ -359,9 +364,14 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
     <div class="page" id="page-logs">
       <div class="page-title" style="display:flex;justify-content:space-between;align-items:center">
         <span>📋 运行日志 <span style="font-size:14px;color:var(--text3);font-weight:normal" id="logCountFull">(0条)</span></span>
-        <button class="btn btn-outline" style="padding:6px 16px;font-size:13px" onclick="clearLogs()">🗑 清除日志</button>
+        <div style="display:flex;gap:8px;align-items:center">
+          <label style="font-size:13px;color:var(--text2);cursor:pointer;display:flex;align-items:center;gap:4px">
+            <input type="checkbox" id="autoFollowLogsFull" checked> 跟随最新
+          </label>
+          <button class="btn btn-outline" style="padding:6px 16px;font-size:13px" onclick="clearLogs()">🗑 清除日志</button>
+        </div>
       </div>
-      <div class="full-log-list" id="logListFull">
+      <div class="full-log-list" id="logListFull" onscroll="onLogScrollFull(this)">
         <div style="text-align:center;color:var(--text3);padding:40px">加载中...</div>
       </div>
     </div>
@@ -451,9 +461,9 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
     <div class="page" id="page-account">
       <div class="page-title">👤 账号管理</div>
 
-      <!-- 添加/更新账号 -->
+      <!-- 添加/编辑账号 -->
       <div class="account-card" style="max-width:600px;margin-bottom:16px">
-        <h3>➕ 添加 / 更新账号</h3>
+        <h3 id="accountFormTitle">➕ 添加 / 编辑账号</h3>
         <div class="form-group">
           <label class="form-label">Access Token</label>
           <input class="form-input" id="inputToken" type="text" placeholder="粘贴 PDDAccessToken 的值">
@@ -467,9 +477,10 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
           <textarea class="form-input" id="inputCookies" placeholder="粘贴从抓包工具获取的完整 Cookie 字符串&#10;格式: key1=value1; key2=value2; ...&#10;如果只填 Access Token 也可以"></textarea>
         </div>
         <div class="btn-group">
-          <button class="btn btn-primary" onclick="saveAccount()">💾 保存账号</button>
+          <button class="btn btn-primary" onclick="saveAccount()" id="btnSaveAcc">💾 保存账号</button>
           <button class="btn btn-success" id="btnTestCookie" onclick="testCookie()">🧪 测试 Cookie</button>
           <button class="btn btn-danger" onclick="clearAccount()">🗑 清除账号</button>
+          <button class="btn btn-outline" onclick="loadAccountToForm()" style="margin-left:auto">📝 加载当前账号到表单</button>
         </div>
         <div id="testResult" style="display:none"></div>
       </div>
@@ -510,7 +521,7 @@ const STATUS_MAP = {
 // === Navigation===
 const PAGE_TITLES = {
   overview: '控制面板', logs: '运行日志', history: '抢券历史',
-  config: '配置详情', account: '账号信息'
+  config: '配置详情', account: '账号管理'
 };
 document.querySelectorAll('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
@@ -714,7 +725,28 @@ async function clearAccount() {
   try {
     await fetch('/api/account', { method:'DELETE' });
     showToast('账号已清除', 'info');
+    document.getElementById('inputToken').value = '';
+    document.getElementById('inputUserId').value = '';
+    document.getElementById('inputCookies').value = '';
   } catch(e) { showToast('清除失败: '+e.message, 'error'); }
+}
+
+// 加载当前账号到表单（用于编辑）
+async function loadAccountToForm() {
+  try {
+    const r = await fetch('/api/state');
+    const d = await r.json();
+    const token = d.state.access_token || '';
+    const uid = d.state.user_id || '';
+    const cookies = d.state.cookies || {};
+    // 把 cookies 拼成字符串
+    const cookieStr = Object.entries(cookies).map(([k,v]) => k+'='+v).join('; ');
+    document.getElementById('inputToken').value = token;
+    document.getElementById('inputUserId').value = uid;
+    document.getElementById('inputCookies').value = cookieStr;
+    document.getElementById('accountFormTitle').textContent = '✏️ 编辑当前账号 (修改后点保存)';
+    showToast('已加载当前账号数据到表单，可直接编辑保存', 'info');
+  } catch(e) { showToast('加载失败: '+e.message, 'error'); }
 }
 
 function updateCountdown(data) {
@@ -769,6 +801,20 @@ function tickCountdown() {
 }
 requestAnimationFrame(tickCountdown);
 
+// === Log Scroll Control ===
+let _userScrolledLog = false;
+function onLogScroll(el) {
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+  _userScrolledLog = !atBottom;
+  if (atBottom) {
+    document.getElementById('autoFollowLogs').checked = true;
+  }
+}
+function onLogScrollFull(el) {
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+  if (atBottom) document.getElementById('autoFollowLogsFull').checked = true;
+}
+
 function updateLogs(logs) {
   const el = document.getElementById('logList');
   document.getElementById('logCount').textContent = `(${logs.length}条)`;
@@ -785,11 +831,15 @@ function updateLogs(logs) {
   const logFull = document.getElementById('logListFull');
   if (logFull) {
     logFull.innerHTML = html;
-    // 自动滚动到底部 (最新日志)
-    logFull.scrollTop = logFull.scrollHeight;
+    // 只在"跟随最新"开启时自动滚动
+    if (document.getElementById('autoFollowLogsFull').checked) {
+      logFull.scrollTop = logFull.scrollHeight;
+    }
   }
-  // 概览页也自动滚动
-  el.scrollTop = el.scrollHeight;
+  // 概览页也只在"跟随最新"开启时自动滚动
+  if (document.getElementById('autoFollowLogs').checked) {
+    el.scrollTop = el.scrollHeight;
+  }
 }
 
 function updateHistory(list) {
@@ -831,7 +881,7 @@ async function poll() {
     updateCountdown(data.state);
     updateLogs(data.logs);
     updateHistory(data.history);
-    // Account: token preview + cookie list
+    // Account: token preview + cookie list + pre-fill form
     const tokenPrev = document.getElementById('accTokenPreview');
     if (tokenPrev) tokenPrev.textContent = data.state.access_token || '未加载';
     const cookieList = document.getElementById('accCookieList');
@@ -839,6 +889,14 @@ async function poll() {
       cookieList.innerHTML = Object.entries(data.state.cookies).map(([k,v]) =>
         `<div class="account-row"><span class="account-label">${k}</span><span class="account-value" style="font-size:11px">${String(v).substring(0,40)}${String(v).length>40?'...':''}</span></div>`
       ).join('') || '<div style="color:var(--text3);padding:20px;text-align:center">无 Cookie</div>';
+    }
+    // 首次加载时预填账号表单（如果表单为空）
+    const inputToken = document.getElementById('inputToken');
+    if (inputToken && !inputToken.value && data.state.access_token) {
+      inputToken.value = data.state.access_token;
+      document.getElementById('inputUserId').value = data.state.user_id || '';
+      const cookies = data.state.cookies || {};
+      document.getElementById('inputCookies').value = Object.entries(cookies).map(([k,v]) => k+'='+v).join('; ');
     }
     // 同步状态显示
     const syncEl = document.getElementById('syncStatus');

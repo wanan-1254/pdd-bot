@@ -508,6 +508,7 @@ def run_grab_session():
                 break
 
         if not success:
+            # 查找有意义的错误信息
             for r in results:
                 data = r.get("data", {})
                 err = str(data.get("error_msg", "")) + str(data.get("errorMsg", ""))
@@ -516,13 +517,17 @@ def run_grab_session():
                     logger.warning(f"券已抢完: {err}")
                     break
             if not detail:
+                # 有结果但没成功也没特殊错误
                 errors = [r.get("error", "") for r in results if r.get("error")]
                 if errors:
                     detail = f"请求失败: {errors[0][:80]}"
-                else:
-                    detail = f"未抢到券 (已发 {total_requests[0]} 个请求)"
-    else:
-        detail = "所有请求均失败"
+                elif results:
+                    detail = f"未抢到券 (已发 {total_requests[0]} 个请求, 均返回非成功)"
+    if not detail:
+        if not results:
+            detail = f"无有效响应 (已发 {total_requests[0]} 个请求)"
+        else:
+            detail = "未知结果"
 
     # 7. 最终结果
     logger.info(f"抢券结束! 成功: {success} | {detail}")
