@@ -922,20 +922,30 @@ def api_save_config():
                 f"结束{STATE['end_hour']:02d}:{STATE['end_minute']:02d}:{STATE['end_second']:02d} | "
                 f"{STATE['thread_count']}线程")
 
-        # 更新调度器触发时间
+        # 更新调度器触发时间（目标时间 - 提前秒数）
         try:
             global _scheduler_ref
             if _scheduler_ref is not None:
                 from apscheduler.triggers.cron import CronTrigger
+                pre_sec = STATE["pre_start_sec"]
+                th = STATE["grab_hour"]
+                tm = STATE["grab_minute"]
+                ts = STATE["grab_second"] - pre_sec
+                if ts < 0:
+                    ts += 60
+                    tm -= 1
+                    if tm < 0:
+                        tm += 60
+                        th -= 1
+                        if th < 0:
+                            th += 24
                 new_trigger = CronTrigger(
-                    hour=STATE["grab_hour"],
-                    minute=STATE["grab_minute"],
-                    second=STATE["grab_second"],
+                    hour=th, minute=tm, second=ts,
                     timezone=BJT,
                 )
                 _scheduler_ref.reschedule_job("pdd_coupon_grab", trigger=new_trigger)
-                add_log("info", "系统", f"调度器已重新定时: 下次抢券 {STATE['next_grab']}")
-                print(f"[Dashboard] 调度器已更新: {STATE['next_grab']}")
+                add_log("info", "系统", f"调度器已重新定时: {th:02d}:{tm:02d}:{ts:02d} 触发 (提前{pre_sec}s)")
+                print(f"[Dashboard] 调度器已更新: {th:02d}:{tm:02d}:{ts:02d}")
             else:
                 add_log("warn", "系统", "调度器未注册，无法更新时间")
                 print(f"[Dashboard] 调度器未注册!")

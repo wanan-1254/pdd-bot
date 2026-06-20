@@ -351,11 +351,12 @@ def run_grab_session():
     target = now.replace(hour=grab_hour, minute=grab_minute, second=grab_second, microsecond=0)
     end_time = now.replace(hour=end_hour, minute=end_minute, second=end_second, microsecond=0)
 
-    # 如果目标时间已过，等明天
-    if now >= target:
+    # 如果目标时间已过超过5秒，等明天（容错窗口防止调度器延迟）
+    grace = timedelta(seconds=5)
+    if now >= target + grace:
         target = target + timedelta(days=1)
         end_time = end_time + timedelta(days=1)
-        logger.info(f"今日目标时间已过，等待明日: {target.strftime('%m-%d %H:%M:%S')}")
+        logger.info(f"今日目标时间已过 ({now:%H:%M:%S} >= {target:%H:%M:%S})，等待明日")
 
     # 开始时间 = 目标时间 - 提前秒数
     start_time = target - timedelta(seconds=pre_start_sec)
@@ -646,17 +647,33 @@ def main():
         STATE["status"] = "waiting"
         return
 
-    # 定时调度
+    # 定时调度：在目标时间 - 提前秒数 触发
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
         from apscheduler.triggers.cron import CronTrigger
 
         global _scheduler
         _scheduler = BackgroundScheduler(timezone=BJT)
+
+        # 计算调度触发时间 = 目标时间 - 提前秒数
+        pre_sec = STATE.get("pre_start_sec", PRE_START_SEC)
+        trigger_hour = STATE.get("grab_hour", GRAB_HOUR)
+        trigger_minute = STATE.get("grab_minute", GRAB_MINUTE)
+        trigger_second = STATE.get("grab_second", GRAB_SECOND) - pre_sec
+        # 处理秒数变成负数的情况
+        if trigger_second < 0:
+            trigger_second += 60
+            trigger_minute -= 1
+            if trigger_minute < 0:
+                trigger_minute += 60
+                trigger_hour -= 1
+                if trigger_hour < 0:
+                    trigger_hour += 24
+
         trigger = CronTrigger(
-            hour=STATE.get("grab_hour", GRAB_HOUR),
-            minute=STATE.get("grab_minute", GRAB_MINUTE),
-            second=STATE.get("grab_second", GRAB_SECOND),
+            hour=trigger_hour,
+            minute=trigger_minute,
+            second=trigger_second,
             timezone=BJT,
         )
         _scheduler.add_job(
