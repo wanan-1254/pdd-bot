@@ -448,6 +448,11 @@ def _make_pdd_session(account: dict):
         "Origin": "https://mobile.yangkeduo.com",
         "Content-Type": "application/json;charset=UTF-8",
     })
+    # 添加 Access Token 到 Header（如果存在）
+    token = account.get("access_token", "")
+    if token:
+        s.headers["Access-Token"] = token
+        s.headers["PDDAccessToken"] = token
     s.cookies.update(account.get("cookies", {}))
     return s
 
@@ -465,11 +470,11 @@ def query_sign_in_status(account: dict) -> dict:
         anti_token = generate_anti_content(int(time.time() * 1000))
         session.headers["anti-content"] = anti_token
         resp = session.post(_PDD_QUERY_URL, json={
+            "request_source": 1,
+            "anti_content": anti_token,
             "task_id": _PDD_TASK_ID,
             "task_template_id": _PDD_TASK_TEMPLATE_ID,
-            "source": "deposit",
             "pdduid": user_id,
-            "request_source": 1,
         }, timeout=10)
 
         data = resp.json()
@@ -512,21 +517,27 @@ def perform_sign_in(account: dict) -> dict:
     """
     from pdd_token import generate_anti_content
     user_id = account.get("user_id", "") or account.get("cookies", {}).get("pdd_user_id", "")
+    label = account.get("label", "?")
     session = _make_pdd_session(account)
 
     try:
         # 1. 先查询获取 sub_task_id
         anti_token = generate_anti_content(int(time.time() * 1000))
         session.headers["anti-content"] = anti_token
-        resp = session.post(_PDD_QUERY_URL, json={
+        query_body = {
+            "request_source": 1,
+            "anti_content": anti_token,
             "task_id": _PDD_TASK_ID,
             "task_template_id": _PDD_TASK_TEMPLATE_ID,
-            "source": "deposit",
             "pdduid": user_id,
-            "request_source": 1,
-        }, timeout=10)
+        }
+        logger.info(f"[签到] [{label}] 查询请求: {query_body}")
+        resp = session.post(_PDD_QUERY_URL, json=query_body, timeout=10)
+        logger.info(f"[签到] [{label}] 查询响应 status={resp.status_code}")
 
         data = resp.json()
+        logger.info(f"[签到] [{label}] 查询响应体: {str(data)[:500]}")
+
         if not data.get("success"):
             err = data.get("errorMsg", "查询失败")
             code = data.get("errorCode", "")
@@ -534,16 +545,29 @@ def perform_sign_in(account: dict) -> dict:
 
         result = data.get("result", {})
         sub_tasks = result.get("sub_task_list", [])
+        logger.info(f"[签到] [{label}] sub_task_list 长度={len(sub_tasks)}, 原始数据: {str(sub_tasks)[:800]}")
+
         if not sub_tasks:
             return {"success": False, "message": "无可用子任务(可能已签到或活动未开启)"}
 
         # 取第一个可点击签到的子任务
         sub_task = sub_tasks[0]
         btn = sub_task.get("check_in_button", {})
-        sub_task_id = sub_task.get("sub_task_id", "")
+        sub_task_id = str(sub_task.get("sub_task_id", ""))
+        
+        # 也尝试其他可能的字段名
+        if not sub_task_id:
+            for key in ["subTaskId", "id", "task_id"]:
+                val = sub_task.get(key, "")
+                if val and str(val):
+                    sub_task_id = str(val)
+                    logger.info(f"[签到] [{label}] 使用字段 '{key}' 作为 sub_task_id: {sub_task_id}")
+                    break
 
         can_click = btn.get("can_click", False)
         finish_count = result.get("finish_count", 0)
+
+        logger.info(f"[签到] [{label}] can_click={can_click}, sub_task_id={sub_task_id}, finish_count={finish_count}")
 
         if not can_click:
             display_status = result.get("display_status", 0)
@@ -551,31 +575,58 @@ def perform_sign_in(account: dict) -> dict:
                 return {"success": False, "message": f"已满{finish_count}天，无需签到"}
             return {"success": False, "message": f"今日不可签到 (display_status={display_status}, 已签到{finish_count}天)"}
 
-        if not sub_task_id:
-            # 兜底：尝试用 task_template_id 作为子任务 ID
-            sub_task_id = str(_PDD_TASK_TEMPLATE_ID)
-
-        # 2. 执行签到
+        # 2. 执行签到 — 参数格式与抢券请求一致
         anti_token = generate_anti_content(int(time.time() * 1000))
         session.headers["anti-content"] = anti_token
-        resp = session.post(_PDD_SIGN_URL, json={
+        
+        # 签到请求体：与抢券接口参数格式对齐
+        sign_body = {
+            "request_source": 1,
+            "anti_content": anti_token,
             "task_id": _PDD_TASK_ID,
             "task_template_id": _PDD_TASK_TEMPLATE_ID,
             "sub_task_id": sub_task_id,
-            "source": "deposit",
-            "pdduid": user_id,
-            "request_source": 1,
-        }, timeout=10)
+        }
+        logger.info(f"[签到] [{label}] 签到请求: {sign_body}")
+        resp = session.post(_PDD_SIGN_URL, json=sign_body, timeout=10)
+        logger.info(f"[签到] [{label}] 签到响应 status={resp.status_code}")
 
         data = resp.json()
+        resp_str = str(data)
+        logger.info(f"[签到] [{label}] 签到响应体: {resp_str[:500]}")
+        
         if data.get("success"):
             new_count = finish_count + 1
             return {"success": True, "message": f"签到成功 ({new_count}/5天)"}
         else:
             err = data.get("errorMsg", "签到失败")
             code = data.get("errorCode", "")
+            
+            # 如果还是8070001错误，尝试不带 sub_task_id 的请求
+            if code == "8070001":
+                logger.warning(f"[签到] [{label}] 8070001错误，尝试不带sub_task_id...")
+                anti_token2 = generate_anti_content(int(time.time() * 1000))
+                session.headers["anti-content"] = anti_token2
+                simple_body = {
+                    "request_source": 1,
+                    "anti_content": anti_token2,
+                    "task_id": _PDD_TASK_ID,
+                    "task_template_id": _PDD_TASK_TEMPLATE_ID,
+                }
+                resp2 = session.post(_PDD_SIGN_URL, json=simple_body, timeout=10)
+                data2 = resp2.json()
+                logger.info(f"[签到] [{label}] 简化请求响应: {str(data2)[:500]}")
+                
+                if data2.get("success"):
+                    new_count = finish_count + 1
+                    return {"success": True, "message": f"签到成功 ({new_count}/5天)"}
+                err2 = data2.get("errorMsg", err)
+                code2 = data2.get("errorCode", code)
+                return {"success": False, "message": f"{err2} (code: {code2})"}
+            
             return {"success": False, "message": f"{err} (code: {code})"}
     except Exception as e:
+        logger.error(f"[签到] [{label}] 异常: {e}", exc_info=True)
         return {"success": False, "message": str(e)}
 
 
