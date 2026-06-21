@@ -50,6 +50,7 @@ STATE = {
     "last_grab_result": "",
     "ntp_offset_ms": 0,
     "uptime_start": time.time(),
+    "query_interval_minutes": 120,
 }
 
 # 日志队列 (最多保留 200 条)
@@ -174,8 +175,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC'
 .log-tag { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; white-space: nowrap; }
 .log-tag.系统 { background: var(--green-bg); color: var(--green); }
 .log-tag.抢券 { background: var(--red-bg); color: var(--red); }
+.log-tag.签到 { background: var(--purple-bg); color: var(--purple); }
 .log-tag.登录 { background: var(--blue-bg); color: var(--blue); }
-.log-tag.NTP { background: var(--purple-bg); color: var(--purple); }
+.log-tag.NTP { background: var(--orange-bg); color: var(--orange); }
 .log-tag.配置 { background: var(--orange-bg); color: var(--orange); }
 .log-msg { flex: 1; word-break: break-all; }
 .log-level-warn { color: var(--orange); }
@@ -434,23 +436,30 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
         <div class="config-row"><span class="config-key">PORT</span><span class="config-val">Web 面板端口</span></div>
       </div>
 
-      <!-- 安全设置 -->
+      <!-- 安全设置 · 账号密码管理 -->
       <div style="margin-top:16px;padding:16px;background:var(--card);border:1px solid var(--border);border-radius:12px">
-        <h3 style="margin-bottom:12px">🔒 安全设置 · 修改密码</h3>
+        <h3 style="margin-bottom:12px">🔒 安全设置</h3>
+        <div id="loginInfoBox" style="padding:10px 14px;background:var(--bg);border-radius:8px;border:1px solid var(--border);margin-bottom:12px;font-size:13px">
+          当前登录账号: <strong id="currentLoginUser">加载中...</strong>
+        </div>
         <div class="form-group">
-          <label class="form-label">当前密码</label>
-          <input class="form-input" id="pwdOld" type="password" placeholder="输入当前密码" style="max-width:300px">
+          <label class="form-label">新用户名 <span style="color:var(--text3);font-weight:normal">(可选，不改则留空)</span></label>
+          <input class="form-input" id="newLoginUser" type="text" placeholder="新的登录用户名，如 admin2" style="max-width:300px">
         </div>
         <div class="form-group">
           <label class="form-label">新密码</label>
-          <input class="form-input" id="pwdNew" type="password" placeholder="新密码（至少4位）" style="max-width:300px" oninput="document.getElementById('pwdConfirm').pattern=this.value.replace(/[.*+?^${}()|[\]\\\\]/g,'\\\\$&')">
+          <input class="form-input" id="pwdNew" type="password" placeholder="新密码（至少4位）" style="max-width:300px">
         </div>
         <div class="form-group">
           <label class="form-label">确认新密码</label>
           <input class="form-input" id="pwdConfirm" type="password" placeholder="再次输入新密码" style="max-width:300px">
         </div>
+        <div class="form-group">
+          <label class="form-label">当前密码</label>
+          <input class="form-input" id="pwdOld" type="password" placeholder="输入当前密码以确认身份" style="max-width:300px">
+        </div>
         <div class="btn-group">
-          <button class="btn btn-primary" onclick="changePassword()">🔒 修改密码</button>
+          <button class="btn btn-primary" onclick="changeLoginCredentials()">🔒 修改账号密码</button>
           <button class="btn btn-danger" onclick="logout()" style="margin-left:10px">🚪 退出登录</button>
         </div>
         <div id="pwdResult" style="display:none;margin-top:12px"></div>
@@ -461,73 +470,91 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
     <div class="page" id="page-account">
       <div class="page-title">👤 账号管理</div>
 
+      <!-- 账号列表 -->
+      <div class="account-card" style="max-width:800px;margin-bottom:16px">
+        <h3 style="display:flex;justify-content:space-between;align-items:center">
+          <span>📝 PDD 账号列表</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            <span style="font-size:12px;color:var(--text3)" id="accCount">0 个账号</span>
+            <button class="btn btn-outline" style="padding:4px 10px;font-size:11px" onclick="queryAllSignIn()">🔍 查询全部</button>
+            <button class="btn btn-success" style="padding:4px 10px;font-size:11px" onclick="signInAll()">📝 全部签到</button>
+          </div>
+        </h3>
+        <div id="accountList" style="margin-top:12px">
+          <div style="text-align:center;color:var(--text3);padding:30px">加载中...</div>
+        </div>
+      </div>
+
       <!-- 添加/编辑账号 -->
-      <div class="account-card" style="max-width:600px;margin-bottom:16px">
-        <h3 id="accountFormTitle">➕ 添加 / 编辑账号</h3>
+      <div class="account-card" style="max-width:800px;margin-bottom:16px">
+        <h3 id="accountFormTitle">➕ 添加账号</h3>
         <p style="font-size:12px;color:var(--text3);margin-bottom:12px">⚠️ 以下为拼多多抢券凭证（Token/Cookie），不是登录密码</p>
+        <input type="hidden" id="editAccountId" value="">
+        <div class="form-group">
+          <label class="form-label">标签名 <span style="color:var(--text3);font-weight:normal">(如“大号”“小号”，可选)</span></label>
+          <input class="form-input" id="inputLabel" type="text" placeholder="给账号取个名字" style="max-width:300px">
+        </div>
         <div class="form-group">
           <label class="form-label">Access Token <span style="color:var(--text3);font-weight:normal">(PDDAccessToken，必填)</span></label>
           <input class="form-input" id="inputToken" type="text" placeholder="粘贴 PDDAccessToken 的值">
         </div>
         <div class="form-group">
-          <label class="form-label">PDD User ID <span style="color:var(--text3);font-weight:normal">(数字ID，如5245009499192，可选，自动提取)</span></label>
-          <input class="form-input" id="inputUserId" type="text" placeholder="从 Cookie 的 pdd_user_id 字段自动获取，一般无需手动填">
-        </div>
-        <div class="form-group">
           <label class="form-label">完整 Cookie 字符串 (可选)</label>
           <textarea class="form-input" id="inputCookies" placeholder="粘贴从抓包工具获取的完整 Cookie 字符串&#10;格式: key1=value1; key2=value2; ...&#10;如果只填 Access Token 也可以"></textarea>
         </div>
+        <h4 style="margin:16px 0 10px;font-size:14px">🎯 此账号的抢券配置</h4>
+        <div class="form-row" style="margin-bottom:10px">
+          <span class="form-label" style="min-width:80px">目标时间</span>
+          <input class="form-input form-input-sm" id="accGrabH" type="number" min="0" max="23" placeholder="时" style="width:60px">
+          <span>:</span>
+          <input class="form-input form-input-sm" id="accGrabM" type="number" min="0" max="59" placeholder="分" style="width:60px">
+          <span>:</span>
+          <input class="form-input form-input-sm" id="accGrabS" type="number" min="0" max="59" placeholder="秒" style="width:60px">
+        </div>
+        <div class="form-row" style="margin-bottom:10px">
+          <span class="form-label" style="min-width:80px">提前开火</span>
+          <input class="form-input form-input-sm" id="accPreSec" type="number" min="1" max="120" placeholder="秒" style="width:80px">
+          <span>秒前开始</span>
+        </div>
+        <div class="form-row" style="margin-bottom:10px">
+          <span class="form-label" style="min-width:80px">结束时间</span>
+          <input class="form-input form-input-sm" id="accEndH" type="number" min="0" max="23" placeholder="时" style="width:60px">
+          <span>:</span>
+          <input class="form-input form-input-sm" id="accEndM" type="number" min="0" max="59" placeholder="分" style="width:60px">
+          <span>:</span>
+          <input class="form-input form-input-sm" id="accEndS" type="number" min="0" max="59" placeholder="秒" style="width:60px">
+        </div>
+        <div class="form-row" style="margin-bottom:10px">
+          <span class="form-label" style="min-width:80px">并发线程</span>
+          <input class="form-input form-input-sm" id="accThreads" type="number" min="1" max="20" placeholder="个" style="width:80px">
+          <span>个线程持续发送</span>
+        </div>
         <div class="btn-group">
           <button class="btn btn-primary" onclick="saveAccount()" id="btnSaveAcc">💾 保存账号</button>
-          <button class="btn btn-success" id="btnTestCookie" onclick="testCookie()">🧪 测试 Cookie</button>
-          <button class="btn btn-danger" onclick="clearAccount()">🗑 清除账号</button>
-          <button class="btn btn-outline" onclick="loadAccountToForm()" style="margin-left:auto">📝 加载当前账号到表单</button>
+          <button class="btn btn-outline" onclick="resetAccountForm()">↩ 重置表单</button>
+          <button class="btn btn-outline" onclick="fillDefaultConfig()">📝 填充全局默认配置</button>
         </div>
         <div id="testResult" style="display:none"></div>
       </div>
 
-      <!-- 当前账号信息 -->
-      <div class="account-card" style="max-width:600px">
-        <h3>📋 当前账号信息</h3>
-        <div class="account-row"><span class="account-label">Token 状态</span><span class="account-value" id="accTokenStatus">-</span></div>
-        <div class="account-row"><span class="account-label">User ID</span><span class="account-value" id="accUserId">-</span></div>
-        <div class="account-row"><span class="account-label">Cookie 数量</span><span class="account-value" id="accCookieCount">-</span></div>
-        <div class="account-row"><span class="account-label">NTP 偏移</span><span class="account-value" id="accNtp">-</span></div>
-        <div class="account-row"><span class="account-label">上次抢券</span><span class="account-value" id="accLastGrab">-</span></div>
-        <div class="account-row"><span class="account-label">上次结果</span><span class="account-value" id="accLastResult">-</span></div>
-      </div>
-      <div class="account-card" style="margin-top:16px;max-width:600px">
-        <h3>🔑 Access Token</h3>
-        <div class="token-preview" id="accTokenPreview">加载中...</div>
-      </div>
-      <div class="account-card" style="margin-top:16px;max-width:600px">
-        <h3>🍪 Cookie 列表</h3>
-        <div id="accCookieList" style="max-height:300px;overflow-y:auto">
-          <div style="color:var(--text3);padding:20px;text-align:center">加载中...</div>
+      <!-- 自动查询设置 -->
+      <div class="account-card" style="max-width:800px;margin-top:16px">
+        <h3>🔄 自动查询设置</h3>
+        <p style="font-size:12px;color:var(--text3);margin-bottom:12px">设置自动查询签到状态的间隔时间</p>
+        <div class="form-row" style="margin-bottom:12px">
+          <span class="form-label" style="min-width:100px">查询间隔</span>
+          <select class="form-input" id="queryInterval" style="max-width:150px" onchange="saveQueryInterval()">
+            <option value="30">30 分钟</option>
+            <option value="60">1 小时</option>
+            <option value="120" selected>2 小时</option>
+            <option value="180">3 小时</option>
+            <option value="360">6 小时</option>
+            <option value="720">12 小时</option>
+          </select>
         </div>
-      </div>
-
-      <!-- 登录账号管理 -->
-      <div class="account-card" style="margin-top:16px;max-width:600px;background:linear-gradient(135deg,#fef2f2,#fff7ed)">
-        <h3>🔐 登录面板账号管理</h3>
-        <p style="font-size:12px;color:var(--text3);margin-bottom:12px">修改 Web 面板的登录用户名和密码（不是拼多多账号）</p>
-        <div id="loginInfoBox" style="padding:10px 14px;background:white;border-radius:8px;border:1px solid var(--border);margin-bottom:12px;font-size:13px">
-          当前登录账号: <strong id="currentLoginUser">加载中...</strong>
+        <div id="queryIntervalInfo" style="font-size:12px;color:var(--text2);padding:8px 12px;background:var(--bg);border-radius:6px">
+          当前: 每 2 小时自动查询一次签到状态
         </div>
-        <div class="form-group">
-          <label class="form-label">新用户名（可选，不改则留空）</label>
-          <input class="form-input" id="newLoginUser" type="text" placeholder="新的登录用户名，如 admin2">
-        </div>
-        <div class="form-group">
-          <label class="form-label">新密码</label>
-          <input class="form-input" id="newLoginPwd" type="password" placeholder="新密码（至少4位）">
-        </div>
-        <div class="form-group">
-          <label class="form-label">当前密码确认</label>
-          <input class="form-input" id="oldLoginPwdConfirm" type="password" placeholder="输入当前密码以确认身份">
-        </div>
-        <button class="btn btn-primary" onclick="changeLoginCredentials()">🔑 修改登录凭证</button>
-        <div id="loginCredResult" style="display:none;margin-top:12px"></div>
       </div>
     </div>
   </div>
@@ -557,9 +584,9 @@ document.querySelectorAll('.nav-item').forEach(item => {
     const el = document.getElementById('page-' + page);
     if (el) el.classList.add('active');
     document.getElementById('pageTitle').textContent = PAGE_TITLES[page] || '控制面板';
-    // 切换到账号页时加载登录用户名
+    // 切换到账号页时加载登录信息（需要已登录）
     if (page === 'account') {
-      fetch('/api/login-username').then(r => r.json()).then(d => {
+      fetch('/api/get-login-info').then(r => r.json()).then(d => {
         const el = document.getElementById('currentLoginUser');
         if (el) el.textContent = d.username || '(未知)';
       }).catch(() => {});
@@ -600,15 +627,29 @@ function updateDashboard(data) {
   const uptime = Math.floor((Date.now()/1000) - data.uptime_start);
   const h = Math.floor(uptime/3600), m = Math.floor((uptime%3600)/60);
   document.getElementById('cfgUptime').textContent = `${h}时${m}分`;
-  // Account page
-  document.getElementById('accTokenStatus').innerHTML = data.token_valid
-    ? '<span style="color:var(--green)">✓ 有效</span>' : '<span style="color:var(--red)">✗ 无效</span>';
-  document.getElementById('accUserId').textContent = data.user_id || '-';
-  document.getElementById('accCookieCount').textContent = data.cookie_count + ' 个';
-  document.getElementById('accNtp').textContent = data.ntp_offset_ms.toFixed(1) + ' ms';
-  document.getElementById('accLastGrab').textContent = data.last_grab_time || '-';
-  document.getElementById('accLastResult').textContent = data.last_grab_result || '-';
-  // Fill config form
+  // 存储全局配置 (供 fillDefaultConfig 使用)
+  window._globalGrabH = data.grab_hour;
+  window._globalGrabM = data.grab_minute;
+  window._globalGrabS = data.grab_second;
+  window._globalPreSec = data.pre_start_sec || 10;
+  window._globalEndH = data.end_hour || 0;
+  window._globalEndM = data.end_minute || 0;
+  window._globalEndS = data.end_second || 30;
+  window._globalThreads = data.thread_count || 5;
+  // Account page: 渲染账号列表
+  if (data.accounts !== undefined) {
+    renderAccountList(data.accounts);
+  }
+  // 回显查询间隔
+  const qiEl = document.getElementById('queryInterval');
+  if (qiEl && !qiEl.dataset.filled) {
+    qiEl.value = String(data.query_interval_minutes || 120);
+    qiEl.dataset.filled = '1';
+    const labels = {30:'30分钟',60:'1小时',120:'2小时',180:'3小时',360:'6小时',720:'12小时'};
+    const infoEl = document.getElementById('queryIntervalInfo');
+    if (infoEl) infoEl.textContent = '当前: 每 ' + (labels[qiEl.value]||qiEl.value+'分钟') + ' 自动查询一次签到状态';
+  }
+  // Fill global config form
   const eh = document.getElementById('editHour');
   if (eh && !eh.dataset.filled) {
     eh.value = data.grab_hour; eh.dataset.filled = '1';
@@ -674,28 +715,49 @@ async function testGrab() {
 
 // === Auth & Security ===
 async function changePassword() {
+  // 兼容旧调用，转发到 changeLoginCredentials
+  return changeLoginCredentials();
+}
+
+async function changeLoginCredentials() {
   const oldPw = document.getElementById('pwdOld').value;
   const newPw = document.getElementById('pwdNew').value;
   const confirm = document.getElementById('pwdConfirm').value;
-  if (!oldPw || !newPw) { showToast('请填写所有密码字段', 'error'); return; }
-  if (newPw.length < 4) { showToast('新密码至少4位', 'error'); return; }
-  if (newPw !== confirm) { showToast('两次新密码不一致', 'error'); return; }
+  const newUser = document.getElementById('newLoginUser').value.trim();
+
+  if (!oldPw) { showToast('请输入当前密码确认身份', 'error'); return; }
+  if (newPw && newPw.length < 4) { showToast('新密码至少4位', 'error'); return; }
+  if (newPw && newPw !== confirm) { showToast('两次新密码不一致', 'error'); return; }
+  if (!newPw && !newUser) { showToast('至少要修改用户名或密码', 'error'); return; }
+
   try {
     const r = await fetch('/api/change-password', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({old_password:oldPw, new_password:newPw})
+      body: JSON.stringify({old_password: oldPw, new_password: newPw || undefined, new_username: newUser || undefined})
     });
     const d = await r.json();
+    const el = document.getElementById('pwdResult');
+    el.style.display = 'block';
     if (d.success) {
-      showToast('✅ 密码修改成功', 'success');
+      el.className = 'test-result ok';
+      el.innerHTML = '✅ 登录凭证已更新！下次登录请使用新凭证。';
+      fetch('/api/login-username').then(r2 => r2.json()).then(d2 => {
+        document.getElementById('currentLoginUser').textContent = d2.username || '(未知)';
+      });
       document.getElementById('pwdOld').value = '';
       document.getElementById('pwdNew').value = '';
       document.getElementById('pwdConfirm').value = '';
+      document.getElementById('newLoginUser').value = '';
+      showToast('✅ 账号密码修改成功', 'success');
     } else {
+      el.className = 'test-result fail';
+      el.innerHTML = '❌ ' + (d.error||'修改失败');
       showToast('❌ ' + (d.error||'修改失败'), 'error');
     }
-  } catch(e) { showToast('请求失败: '+e.message, 'error'); }
+  } catch(e) {
+    showToast('请求失败: '+e.message, 'error');
+  }
 }
 
 async function logout() {
@@ -704,114 +766,312 @@ async function logout() {
   window.location.href = '/login';
 }
 
-async function changeLoginCredentials() {
-  const oldPw = document.getElementById('oldLoginPwdConfirm').value;
-  const newPw = document.getElementById('newLoginPwd').value;
-  const newUser = document.getElementById('newLoginUser').value.trim();
-  if (!oldPw) { showToast('请输入当前密码确认身份', 'error'); return; }
-  if (!newPw && !newUser) { showToast('至少要修改用户名或密码', 'error'); return; }
-  try {
-    const r = await fetch('/api/change-password', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({old_password: oldPw, new_password: newPw || undefined, new_username: newUser || undefined})
-    });
-    const d = await r.json();
-    const el = document.getElementById('loginCredResult');
-    el.style.display = 'block';
-    if (d.success) {
-      el.innerHTML = '<span style="color:green">✅ 登录凭证已更新！下次登录请使用新凭证。</span>';
-      // 刷新显示
-      fetch('/api/login-username').then(r2 => r2.json()).then(d2 => {
-        document.getElementById('currentLoginUser').textContent = d2.username || '(未知)';
-      });
-      document.getElementById('oldLoginPwdConfirm').value = '';
-      document.getElementById('newLoginPwd').value = '';
-      document.getElementById('newLoginUser').value = '';
-    } else {
-      el.innerHTML = '<span style="color:red">❌ ' + (d.error||'修改失败') + '</span>';
+// === Account Functions (Multi-Account) ===
+let _accountsCache = [];
+
+function renderAccountList(accounts) {
+  _accountsCache = accounts || [];
+  const el = document.getElementById('accountList');
+  const countEl = document.getElementById('accCount');
+  const enabledCount = _accountsCache.filter(a => a.enabled).length;
+  if (countEl) countEl.textContent = `${_accountsCache.length} 个账号 / ${enabledCount} 个启用`;
+  if (!_accountsCache.length) {
+    el.innerHTML = '<div style="text-align:center;color:var(--text3);padding:30px">暂无账号，请在下方添加</div>';
+    return;
+  }
+  el.innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px">' +
+    _accountsCache.map(a => {
+    const cfg = a.config || {};
+    const si = a.sign_in || {};
+    const fc = si.finish_count || 0;
+    const gc = si.gain_award_count || 0;
+    const ds = si.display_status || 0;
+    const canGrab = si.can_grab || false;
+    const canSign = si.can_sign || false;
+    const autoSign = si.auto_sign_in !== false;
+    const tokenPre = (a.access_token||'').substring(0,12) + '...';
+    const cfgStr = `${String(cfg.grab_hour||0).padStart(2,'0')}:${String(cfg.grab_minute||0).padStart(2,'0')}:${String(cfg.grab_second||0).padStart(2,'0')} 提前${cfg.pre_start_sec||10}s`;
+
+    // 签到进度条 (5天)
+    let progressHtml = '<div style="display:flex;align-items:center;gap:4px;margin:8px 0">';
+    for (let i = 1; i <= 5; i++) {
+      const done = i <= fc;
+      const color = done ? 'var(--green)' : 'var(--border)';
+      const icon = done ? '✅' : '○';
+      progressHtml += `<div style="text-align:center;flex:1"><div style="font-size:16px;color:${color}">${icon}</div><div style="font-size:10px;color:var(--text3)">第${i}天</div></div>`;
+      if (i < 5) progressHtml += `<div style="flex:0.5;height:2px;background:${i < fc ? 'var(--green)' : 'var(--border)'};margin-bottom:14px"></div>`;
     }
-  } catch(e) {
-    const el = document.getElementById('loginCredResult');
-    el.style.display = 'block';
-    el.innerHTML = '<span style="color:red">❌ 请求失败: '+e.message+'</span>';
+    progressHtml += '</div>';
+
+    // 状态标签
+    let statusBadge;
+    if (ds === 40) statusBadge = '<span style="background:var(--orange-bg);color:var(--orange);padding:2px 8px;border-radius:4px;font-size:11px">已领取</span>';
+    else if (canGrab) statusBadge = '<span style="background:var(--green-bg);color:var(--green);padding:2px 8px;border-radius:4px;font-size:11px">可抢券</span>';
+    else if (canSign) statusBadge = '<span style="background:var(--blue-bg);color:var(--blue);padding:2px 8px;border-radius:4px;font-size:11px">可签到</span>';
+    else statusBadge = `<span style="background:var(--bg);color:var(--text2);padding:2px 8px;border-radius:4px;font-size:11px">${fc}/5天</span>`;
+
+    return `
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;${!a.enabled?'opacity:0.5;':''}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+          <div>
+            <div style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:8px">
+              <span style="width:32px;height:32px;border-radius:50%;background:var(--red-bg);display:flex;align-items:center;justify-content:center;font-size:16px">👤</span>
+              ${a.label || '未命名'}
+            </div>
+            <div style="font-size:11px;color:var(--text3);margin-top:4px;margin-left:40px;font-family:monospace">${tokenPre}</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            ${statusBadge}
+            <label style="display:flex;align-items:center;gap:3px;font-size:11px;cursor:pointer;color:var(--text2)">
+              <input type="checkbox" ${a.enabled ? 'checked' : ''} onchange="toggleAccount('${a.id}', this.checked)"> 启用
+            </label>
+          </div>
+        </div>
+        ${progressHtml}
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;flex-wrap:wrap;gap:6px">
+          <div style="font-size:11px;color:var(--text3)">🕐 ${cfgStr} | ${cfg.thread_count||5}线程</div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            <button class="btn btn-outline" style="padding:3px 8px;font-size:11px" onclick="queryAccountSignIn('${a.id}','${a.label||''}')" title="查询签到状态">🔍</button>
+            <button class="btn btn-outline" style="padding:3px 8px;font-size:11px" onclick="doAccountSignIn('${a.id}','${a.label||''}')" title="手动签到">📝</button>
+            <button class="btn btn-outline" style="padding:3px 8px;font-size:11px" onclick="editAccount('${a.id}')" title="编辑">✏️</button>
+            <button class="btn btn-outline" style="padding:3px 8px;font-size:11px;color:var(--red)" onclick="delAccount('${a.id}')" title="删除">🗑</button>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+          <label style="font-size:11px;color:var(--text2);cursor:pointer;display:flex;align-items:center;gap:3px">
+            <input type="checkbox" ${autoSign ? 'checked' : ''} onchange="toggleAutoSignIn('${a.id}', this.checked)"> 自动签到
+          </label>
+          ${si.last_check ? `<span style="font-size:10px;color:var(--text3)">上次检查: ${si.last_check}</span>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('') + '</div>';
+}
+
+async function saveAccount() {
+  const editId = document.getElementById('editAccountId').value;
+  const label = document.getElementById('inputLabel').value.trim();
+  const token = document.getElementById('inputToken').value.trim();
+  const cookiesStr = document.getElementById('inputCookies').value.trim();
+  const config = {
+    grab_hour: parseInt(document.getElementById('accGrabH').value) || 0,
+    grab_minute: parseInt(document.getElementById('accGrabM').value) || 0,
+    grab_second: parseInt(document.getElementById('accGrabS').value) || 0,
+    pre_start_sec: parseInt(document.getElementById('accPreSec').value) || 10,
+    end_hour: parseInt(document.getElementById('accEndH').value) || 0,
+    end_minute: parseInt(document.getElementById('accEndM').value) || 0,
+    end_second: parseInt(document.getElementById('accEndS').value) || 30,
+    thread_count: parseInt(document.getElementById('accThreads').value) || 5,
+  };
+
+  if (editId) {
+    // 更新现有账号
+    try {
+      const r = await fetch(`/api/accounts/${editId}`, {
+        method:'PUT', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ label, access_token: token, cookie_string: cookiesStr, config })
+      });
+      const d = await r.json();
+      if (d.success) { showToast('账号已更新!', 'success'); resetAccountForm(); }
+      else showToast('更新失败: ' + (d.error||''), 'error');
+    } catch(e) { showToast('请求失败: '+e.message, 'error'); }
+  } else {
+    // 新增账号
+    if (!token && !cookiesStr) { showToast('请至少填写 Access Token 或 Cookie', 'error'); return; }
+    try {
+      const r = await fetch('/api/accounts', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ access_token: token, cookie_string: cookiesStr, label, config })
+      });
+      const d = await r.json();
+      if (d.success) { showToast('账号已添加!', 'success'); resetAccountForm(); }
+      else showToast('添加失败: ' + (d.error||''), 'error');
+    } catch(e) { showToast('请求失败: '+e.message, 'error'); }
   }
 }
 
-// === Account Functions ===
-async function saveAccount() {
-  const token = document.getElementById('inputToken').value.trim();
-  const userId = document.getElementById('inputUserId').value.trim();
-  const cookiesStr = document.getElementById('inputCookies').value.trim();
-  if (!token && !cookiesStr) { showToast('请至少填写 Access Token 或 Cookie', 'error'); return; }
+function resetAccountForm() {
+  document.getElementById('editAccountId').value = '';
+  document.getElementById('inputLabel').value = '';
+  document.getElementById('inputToken').value = '';
+  document.getElementById('inputCookies').value = '';
+  document.getElementById('accGrabH').value = '';
+  document.getElementById('accGrabM').value = '';
+  document.getElementById('accGrabS').value = '';
+  document.getElementById('accPreSec').value = '';
+  document.getElementById('accEndH').value = '';
+  document.getElementById('accEndM').value = '';
+  document.getElementById('accEndS').value = '';
+  document.getElementById('accThreads').value = '';
+  document.getElementById('accountFormTitle').textContent = '➕ 添加账号';
+  document.getElementById('btnSaveAcc').textContent = '💾 保存账号';
+  const tr = document.getElementById('testResult');
+  if (tr) tr.style.display = 'none';
+}
+
+function fillDefaultConfig() {
+  // 从全局 STATE 填充默认配置
+  document.getElementById('accGrabH').value = window._globalGrabH || 0;
+  document.getElementById('accGrabM').value = window._globalGrabM || 0;
+  document.getElementById('accGrabS').value = window._globalGrabS || 0;
+  document.getElementById('accPreSec').value = window._globalPreSec || 10;
+  document.getElementById('accEndH').value = window._globalEndH || 0;
+  document.getElementById('accEndM').value = window._globalEndM || 0;
+  document.getElementById('accEndS').value = window._globalEndS || 30;
+  document.getElementById('accThreads').value = window._globalThreads || 5;
+  showToast('已填充全局默认配置', 'info');
+}
+
+function editAccount(id) {
+  const acc = _accountsCache.find(a => a.id === id);
+  if (!acc) return;
+  document.getElementById('editAccountId').value = id;
+  document.getElementById('inputLabel').value = acc.label || '';
+  document.getElementById('inputToken').value = acc.access_token || '';
+  const cookieStr = Object.entries(acc.cookies||{}).map(([k,v]) => k+'='+v).join('; ');
+  document.getElementById('inputCookies').value = cookieStr;
+  const cfg = acc.config || {};
+  document.getElementById('accGrabH').value = cfg.grab_hour || 0;
+  document.getElementById('accGrabM').value = cfg.grab_minute || 0;
+  document.getElementById('accGrabS').value = cfg.grab_second || 0;
+  document.getElementById('accPreSec').value = cfg.pre_start_sec || 10;
+  document.getElementById('accEndH').value = cfg.end_hour || 0;
+  document.getElementById('accEndM').value = cfg.end_minute || 0;
+  document.getElementById('accEndS').value = cfg.end_second || 30;
+  document.getElementById('accThreads').value = cfg.thread_count || 5;
+  document.getElementById('accountFormTitle').textContent = '✏️ 编辑账号: ' + (acc.label || acc.id);
+  document.getElementById('btnSaveAcc').textContent = '💾 更新账号';
+  // 滚动到表单
+  document.getElementById('inputLabel').scrollIntoView({behavior:'smooth'});
+}
+
+async function delAccount(id) {
+  const acc = _accountsCache.find(a => a.id === id);
+  if (!confirm(`确定删除账号“${acc ? acc.label : id}”？`)) return;
   try {
-    const r = await fetch('/api/account', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ access_token: token, user_id: userId, cookie_string: cookiesStr })
-    });
+    const r = await fetch(`/api/accounts/${id}`, { method:'DELETE' });
     const d = await r.json();
-    if (d.success) {
-      showToast('账号已保存!', 'success');
-      document.getElementById('inputToken').value = '';
-      document.getElementById('inputUserId').value = '';
-      document.getElementById('inputCookies').value = '';
-    } else showToast('保存失败: ' + (d.error||''), 'error');
+    if (d.success) showToast('账号已删除', 'success');
+    else showToast('删除失败: ' + (d.error||''), 'error');
   } catch(e) { showToast('请求失败: '+e.message, 'error'); }
 }
 
-async function testCookie() {
-  const btn = document.getElementById('btnTestCookie');
+async function toggleAccount(id, enabled) {
+  try {
+    await fetch(`/api/accounts/${id}/toggle`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({enabled})
+    });
+  } catch(e) { console.error(e); }
+}
+
+async function testAccountCookie(id, label) {
   const result = document.getElementById('testResult');
-  btn.disabled = true;
-  btn.textContent = '⏳ 测试中...';
   result.style.display = 'block';
   result.className = 'test-result loading';
-  result.innerHTML = '🔄 正在测试 Cookie 是否有效，请稍候...';
+  result.innerHTML = `🔄 正在测试“${label}”的 Cookie...`;
   try {
-    const r = await fetch('/api/test-cookie', { method:'POST' });
+    const r = await fetch('/api/test-cookie', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({account_id: id})
+    });
     const d = await r.json();
     if (d.valid) {
       result.className = 'test-result ok';
-      result.innerHTML = '✅ <strong>Cookie 有效!</strong><br>用户ID: ' + (d.user_id||'-') + '<br>昵称: ' + (d.nickname||'-');
+      result.innerHTML = `✅ <strong>Cookie 有效!</strong><br>${d.nickname||''}`;
     } else {
       result.className = 'test-result fail';
-      result.innerHTML = '❌ <strong>Cookie 无效或已过期</strong><br>' + (d.error||'请重新获取 Cookie');
+      result.innerHTML = `❌ <strong>Cookie 无效</strong><br>${d.error||''}`;
     }
   } catch(e) {
     result.className = 'test-result fail';
     result.innerHTML = '❌ 请求失败: ' + e.message;
   }
-  btn.disabled = false;
-  btn.textContent = '🧪 测试 Cookie';
 }
 
-async function clearAccount() {
-  if (!confirm('确定要清除当前账号信息吗？')) return;
+async function queryAccountSignIn(id, label) {
   try {
-    await fetch('/api/account', { method:'DELETE' });
-    showToast('账号已清除', 'info');
-    document.getElementById('inputToken').value = '';
-    document.getElementById('inputUserId').value = '';
-    document.getElementById('inputCookies').value = '';
-  } catch(e) { showToast('清除失败: '+e.message, 'error'); }
-}
-
-// 加载当前账号到表单（用于编辑）
-async function loadAccountToForm() {
-  try {
-    const r = await fetch('/api/state');
+    showToast(`正在查询“${label}”的签到状态...`, 'info');
+    const r = await fetch(`/api/accounts/${id}/sign-in/query`, { method:'POST' });
     const d = await r.json();
-    const token = d.state.access_token || '';
-    const uid = d.state.user_id || '';
-    const cookies = d.state.cookies || {};
-    // 把 cookies 拼成字符串
-    const cookieStr = Object.entries(cookies).map(([k,v]) => k+'='+v).join('; ');
-    document.getElementById('inputToken').value = token;
-    document.getElementById('inputUserId').value = uid;
-    document.getElementById('inputCookies').value = cookieStr;
-    document.getElementById('accountFormTitle').textContent = '✏️ 编辑当前账号 (修改后点保存)';
-    showToast('已加载当前账号数据到表单，可直接编辑保存', 'info');
-  } catch(e) { showToast('加载失败: '+e.message, 'error'); }
+    if (d.success) {
+      const fc = d.finish_count || 0;
+      const gc = d.gain_award_count || 0;
+      const canGrab = d.can_grab ? '✅可抢券' : '❌不可抢券';
+      const canSign = d.can_sign ? '✅可签到' : '❌不可签到';
+      showToast(`[${label}] 签到${fc}/5天 | 领奖${gc}次 | ${canSign} | ${canGrab}`, 'success');
+    } else {
+      showToast(`查询失败: ${d.error||'未知错误'}`, 'error');
+    }
+  } catch(e) { showToast('请求失败: '+e.message, 'error'); }
+}
+
+async function doAccountSignIn(id, label) {
+  try {
+    showToast(`正在为“${label}”签到...`, 'info');
+    const r = await fetch(`/api/accounts/${id}/sign-in`, { method:'POST' });
+    const d = await r.json();
+    if (d.success) {
+      showToast(`[${label}] ${d.message}`, 'success');
+    } else {
+      showToast(`签到失败: ${d.message||d.error||''}`, 'error');
+    }
+  } catch(e) { showToast('请求失败: '+e.message, 'error'); }
+}
+
+async function toggleAutoSignIn(id, enabled) {
+  try {
+    // Update the sign_in.auto_sign_in field
+    await fetch(`/api/accounts/${id}`, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ sign_in: { ...(_accountsCache.find(a=>a.id===id)||{}).sign_in, auto_sign_in: enabled } })
+    });
+  } catch(e) { console.error(e); }
+}
+
+async function queryAllSignIn() {
+  try {
+    showToast('正在查询所有账号签到状态...', 'info');
+    const r = await fetch('/api/query-all-sign-in', { method:'POST' });
+    const d = await r.json();
+    if (d.success) {
+      showToast(`已查询 ${d.results.length} 个账号`, 'success');
+    } else {
+      showToast(`查询失败: ${d.error||''}`, 'error');
+    }
+  } catch(e) { showToast('请求失败: '+e.message, 'error'); }
+}
+
+async function signInAll() {
+  try {
+    showToast('正在为所有账号签到...', 'info');
+    const r = await fetch('/api/sign-in-all', { method:'POST' });
+    const d = await r.json();
+    if (d.success) {
+      const msgs = (d.results||[]).map(r => `${r.label}: ${r.action}`).join('\n');
+      showToast(`签到完成!\n${msgs}`, 'success');
+    } else {
+      showToast(`签到失败: ${d.error||''}`, 'error');
+    }
+  } catch(e) { showToast('请求失败: '+e.message, 'error'); }
+}
+
+async function saveQueryInterval() {
+  const val = document.getElementById('queryInterval').value;
+  try {
+    const r = await fetch('/api/query-interval', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({interval_minutes: parseInt(val)})
+    });
+    const d = await r.json();
+    if (d.success) {
+      const labels = {30:'30分钟',60:'1小时',120:'2小时',180:'3小时',360:'6小时',720:'12小时'};
+      document.getElementById('queryIntervalInfo').textContent = '当前: 每 ' + (labels[val]||val+'分钟') + ' 自动查询一次签到状态';
+      showToast('查询间隔已更新', 'success');
+    } else {
+      showToast('更新失败: '+(d.error||''), 'error');
+    }
+  } catch(e) { showToast('请求失败: '+e.message, 'error'); }
 }
 
 function updateCountdown(data) {
@@ -974,23 +1234,6 @@ async function poll() {
     updateCountdown(data.state);
     updateLogs(data.logs);
     updateHistory(data.history);
-    // Account: token preview + cookie list + pre-fill form
-    const tokenPrev = document.getElementById('accTokenPreview');
-    if (tokenPrev) tokenPrev.textContent = data.state.access_token || '未加载';
-    const cookieList = document.getElementById('accCookieList');
-    if (cookieList && data.state.cookies) {
-      cookieList.innerHTML = Object.entries(data.state.cookies).map(([k,v]) =>
-        `<div class="account-row"><span class="account-label">${k}</span><span class="account-value" style="font-size:11px">${String(v).substring(0,40)}${String(v).length>40?'...':''}</span></div>`
-      ).join('') || '<div style="color:var(--text3);padding:20px;text-align:center">无 Cookie</div>';
-    }
-    // 首次加载时预填账号表单（如果表单为空）
-    const inputToken = document.getElementById('inputToken');
-    if (inputToken && !inputToken.value && data.state.access_token) {
-      inputToken.value = data.state.access_token;
-      document.getElementById('inputUserId').value = data.state.user_id || '';
-      const cookies = data.state.cookies || {};
-      document.getElementById('inputCookies').value = Object.entries(cookies).map(([k,v]) => k+'='+v).join('; ');
-    }
     // 同步状态显示
     const syncEl = document.getElementById('syncStatus');
     if (syncEl && data.sync) {
@@ -1020,19 +1263,24 @@ def index():
 @app.route("/api/state")
 @login_required
 def api_state():
-    # Load token data for account page
-    token_data = {}
+    # 加载账号列表
+    accounts = []
     try:
-        token_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pdd_token")
-        if os.path.exists(token_file):
-            with open(token_file, "r", encoding="utf-8") as f:
-                token_data = json.load(f)
+        from main import load_accounts
+        accounts = load_accounts()
     except Exception:
         pass
 
     state = dict(STATE)
-    state["access_token"] = token_data.get("access_token", "")
-    state["cookies"] = token_data.get("cookies", {})
+    state["accounts"] = accounts
+    # 第一个启用账号的 token 用于兼容显示
+    enabled = [a for a in accounts if a.get("enabled", True)]
+    if enabled:
+        state["access_token"] = enabled[0].get("access_token", "")
+        state["cookies"] = enabled[0].get("cookies", {})
+    else:
+        state["access_token"] = ""
+        state["cookies"] = {}
 
     # 获取同步状态
     sync_status = {}
@@ -1058,6 +1306,7 @@ def api_state():
 def api_save_config():
     try:
         data = request.get_json()
+        # 保存全局默认配置 (新增账号时的默认值)
         STATE["grab_hour"] = data.get("grab_hour", 0)
         STATE["grab_minute"] = data.get("grab_minute", 0)
         STATE["grab_second"] = data.get("grab_second", 0)
@@ -1068,41 +1317,27 @@ def api_save_config():
         STATE["end_second"] = data.get("end_second", 30)
         STATE["thread_count"] = data.get("thread_count", 5)
         add_log("info", "配置",
-                f"配置已更新: {STATE['next_grab']} | "
+                f"全局默认配置已更新: {STATE['next_grab']} | "
                 f"提前{STATE['pre_start_sec']}s | "
                 f"结束{STATE['end_hour']:02d}:{STATE['end_minute']:02d}:{STATE['end_second']:02d} | "
                 f"{STATE['thread_count']}线程")
 
-        # 更新调度器触发时间（目标时间 - 提前秒数）
+        # 更新调度器触发时间 (基于所有账号的最早时间)
         try:
             global _scheduler_ref
             if _scheduler_ref is not None:
                 from apscheduler.triggers.cron import CronTrigger
-                pre_sec = STATE["pre_start_sec"]
-                th = STATE["grab_hour"]
-                tm = STATE["grab_minute"]
-                ts = STATE["grab_second"] - pre_sec
-                if ts < 0:
-                    ts += 60
-                    tm -= 1
-                    if tm < 0:
-                        tm += 60
-                        th -= 1
-                        if th < 0:
-                            th += 24
+                from main import calc_earliest_trigger
+                th, tm, ts = calc_earliest_trigger()
                 new_trigger = CronTrigger(
-                    hour=th, minute=tm, second=ts,
-                    timezone=BJT,
+                    hour=th, minute=tm, second=ts, timezone=BJT,
                 )
                 _scheduler_ref.reschedule_job("pdd_coupon_grab", trigger=new_trigger)
-                add_log("info", "系统", f"调度器已重新定时: {th:02d}:{tm:02d}:{ts:02d} 触发 (提前{pre_sec}s)")
-                print(f"[Dashboard] 调度器已更新: {th:02d}:{tm:02d}:{ts:02d}")
+                add_log("info", "系统", f"调度器已重新定时: {th:02d}:{tm:02d}:{ts:02d}")
             else:
-                add_log("warn", "系统", "调度器未注册，无法更新时间")
-                print(f"[Dashboard] 调度器未注册!")
+                add_log("warn", "系统", "调度器未注册")
         except Exception as e:
             add_log("warn", "系统", f"调度器更新时间失败: {e}")
-            print(f"[Dashboard] 调度器更新失败: {e}")
 
         return jsonify({"success": True})
     except Exception as e:
@@ -1145,6 +1380,109 @@ def api_test_grab():
 
 
 # ============================================================
+# API: 签到管理
+# ============================================================
+@app.route("/api/accounts/<account_id>/sign-in/query", methods=["POST"])
+@login_required
+def api_query_sign_in(account_id):
+    """查询账号签到状态"""
+    try:
+        from main import refresh_account_sign_in
+        result = refresh_account_sign_in(account_id)
+        STATE["accounts"] = __import__("main").load_accounts()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/accounts/<account_id>/sign-in", methods=["POST"])
+@login_required
+def api_perform_sign_in(account_id):
+    """手动执行签到"""
+    try:
+        from main import load_accounts, perform_sign_in, query_sign_in_status, update_account
+        accounts = load_accounts()
+        acc = next((a for a in accounts if a["id"] == account_id), None)
+        if not acc:
+            return jsonify({"success": False, "error": "账号不存在"})
+        label = acc.get("label", "")
+        result = perform_sign_in(acc)
+        # 签到后刷新状态
+        status = query_sign_in_status(acc)
+        if status["success"]:
+            sign_in = acc.get("sign_in", {})
+            sign_in["finish_count"] = status["finish_count"]
+            sign_in["gain_award_count"] = status["gain_award_count"]
+            sign_in["display_status"] = status["display_status"]
+            sign_in["last_check"] = __import__("datetime").datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S")
+            sign_in["can_sign"] = status["can_sign"]
+            sign_in["can_grab"] = status["can_grab"]
+            update_account(account_id, sign_in=sign_in)
+        STATE["accounts"] = __import__("main").load_accounts()
+        add_log("info", "签到", f"[{label}] {result['message']}")
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/sign-in-all", methods=["POST"])
+@login_required
+def api_sign_in_all():
+    """为所有启用账号执行签到"""
+    try:
+        from main import auto_sign_in_all
+        results = auto_sign_in_all()
+        STATE["accounts"] = __import__("main").load_accounts()
+        return jsonify({"success": True, "results": results})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/query-all-sign-in", methods=["POST"])
+@login_required
+def api_query_all_sign_in():
+    """查询所有账号的签到状态"""
+    try:
+        from main import load_accounts, refresh_account_sign_in
+        accounts = load_accounts()
+        results = []
+        for acc in accounts:
+            r = refresh_account_sign_in(acc["id"])
+            results.append({"id": acc["id"], "label": acc.get("label", ""), "result": r})
+        STATE["accounts"] = __import__("main").load_accounts()
+        return jsonify({"success": True, "results": results})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+# ============================================================
+# API: 查询间隔设置
+# ============================================================
+@app.route("/api/query-interval", methods=["POST"])
+@login_required
+def api_query_interval():
+    """更新签到状态查询间隔"""
+    try:
+        data = request.get_json()
+        minutes = data.get("interval_minutes", 120)
+        STATE["query_interval_minutes"] = minutes
+        global _scheduler_ref
+        if _scheduler_ref is not None:
+            try:
+                from apscheduler.triggers.interval import IntervalTrigger
+                _scheduler_ref.reschedule_job(
+                    "pdd_sign_in_query",
+                    trigger=IntervalTrigger(minutes=minutes)
+                )
+                add_log("info", "配置", f"签到查询间隔已更新: {minutes} 分钟")
+            except Exception as e:
+                add_log("warn", "系统", f"更新查询间隔失败: {e}")
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+# ============================================================
 # API: 清除日志 / 历史
 # ============================================================
 @app.route("/api/clear-logs", methods=["POST"])
@@ -1165,145 +1503,193 @@ def api_clear_history():
 
 
 # ============================================================
-# API: 保存账号
+# API: 多账号管理
 # ============================================================
-def _load_token_file():
-    token_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pdd_token")
-    if os.path.exists(token_file):
-        with open(token_file, "r", encoding="utf-8") as f:
-            return json.load(f), token_file
-    return {}, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pdd_token")
-
-
-@app.route("/api/account", methods=["POST"])
-@login_required
-def api_save_account():
+def _reschedule_job():
+    """账号变更后重新调度"""
+    global _scheduler_ref
+    if _scheduler_ref is None:
+        return
     try:
+        from apscheduler.triggers.cron import CronTrigger
+        from main import calc_earliest_trigger
+        th, tm, ts = calc_earliest_trigger()
+        new_trigger = CronTrigger(hour=th, minute=tm, second=ts, timezone=BJT)
+        _scheduler_ref.reschedule_job("pdd_coupon_grab", trigger=new_trigger)
+        add_log("info", "系统", f"调度器已重新定时: {th:02d}:{tm:02d}:{ts:02d}")
+    except Exception as e:
+        add_log("warn", "系统", f"调度器更新时间失败: {e}")
+def _parse_cookie_string(cookie_str: str) -> dict:
+    """解析 cookie 字符串为字典"""
+    cookies = {}
+    if cookie_str and "=" in cookie_str:
+        for pair in cookie_str.split(";"):
+            pair = pair.strip()
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                k = k.strip().lstrip("+").strip()
+                cookies[k] = v.strip()
+    return cookies
+
+
+@app.route("/api/accounts", methods=["POST"])
+@login_required
+def api_add_account():
+    """新增账号"""
+    try:
+        from main import add_account
         data = request.get_json()
         token_str = data.get("access_token", "").strip()
         user_id = data.get("user_id", "").strip()
         cookie_str = data.get("cookie_string", "").strip()
+        label = data.get("label", "").strip()
+        config = data.get("config")  # 可选的独立配置
 
-        # 解析 cookie 字符串
-        cookies = {}
-        if cookie_str and "=" in cookie_str:
-            for pair in cookie_str.split(";"):
-                pair = pair.strip()
-                if "=" in pair:
-                    k, v = pair.split("=", 1)
-                    k = k.strip().lstrip("+").strip()
-                    cookies[k] = v.strip()
-
-        # 从 cookie 中提取 token
+        cookies = _parse_cookie_string(cookie_str)
         if not token_str:
             token_str = cookies.get("PDDAccessToken", "")
         if not user_id:
             user_id = cookies.get("pdd_user_id", "")
-
-        # 如果只提供了 token 没有 cookie，构建最小 cookie
         if token_str and not cookies:
             cookies["PDDAccessToken"] = token_str
             if user_id:
                 cookies["pdd_user_id"] = user_id
-
         if not token_str:
             return jsonify({"success": False, "error": "未检测到 Access Token"})
 
-        # 保存
-        token_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pdd_token")
-        with open(token_file_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "access_token": token_str,
-                "user_id": user_id,
-                "cookies": cookies,
-                "saved_at": datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S"),
-            }, f, ensure_ascii=False, indent=2)
-
-        # 更新 STATE
+        acc = add_account(token_str, user_id, cookies, label, config)
+        STATE["accounts"] = __import__("main").load_accounts()
         STATE["token_valid"] = True
-        STATE["user_id"] = user_id
-        STATE["cookie_count"] = len(cookies)
+        add_log("info", "登录", f"账号已添加: {acc['label']} | Cookie={len(cookies)}个")
+        _reschedule_job()
+        return jsonify({"success": True, "account": acc})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
 
-        add_log("info", "登录", f"账号已保存: Token={token_str[:20]}... UserID={user_id} Cookie={len(cookies)}个")
+
+@app.route("/api/accounts/<account_id>", methods=["PUT"])
+@login_required
+def api_update_account(account_id):
+    """更新账号配置或凭证"""
+    try:
+        from main import update_account, load_accounts
+        data = request.get_json()
+        kwargs = {}
+        if "label" in data:
+            kwargs["label"] = data["label"]
+        if "enabled" in data:
+            kwargs["enabled"] = data["enabled"]
+        if "config" in data:
+            kwargs["config"] = data["config"]
+        if "access_token" in data or "cookie_string" in data:
+            token_str = data.get("access_token", "").strip()
+            cookie_str = data.get("cookie_string", "").strip()
+            cookies = _parse_cookie_string(cookie_str)
+            if not token_str:
+                token_str = cookies.get("PDDAccessToken", "")
+            if token_str and not cookies:
+                cookies["PDDAccessToken"] = token_str
+            if token_str:
+                kwargs["access_token"] = token_str
+                kwargs["cookies"] = cookies
+                kwargs["user_id"] = data.get("user_id", cookies.get("pdd_user_id", ""))
+        update_account(account_id, **kwargs)
+        STATE["accounts"] = __import__("main").load_accounts()
+        add_log("info", "配置", f"账号已更新: {account_id}")
+        _reschedule_job()
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
 
-@app.route("/api/account", methods=["DELETE"])
+@app.route("/api/accounts/<account_id>", methods=["DELETE"])
 @login_required
-def api_clear_account():
+def api_delete_account(account_id):
+    """删除账号"""
     try:
-        token_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pdd_token")
-        if os.path.exists(token_file_path):
-            os.remove(token_file_path)
-        STATE["token_valid"] = False
-        STATE["user_id"] = ""
-        STATE["cookie_count"] = 0
-        add_log("info", "系统", "账号信息已清除")
+        from main import delete_account, load_accounts
+        delete_account(account_id)
+        STATE["accounts"] = load_accounts()
+        enabled = [a for a in STATE["accounts"] if a.get("enabled", True)]
+        STATE["token_valid"] = bool(enabled)
+        STATE["cookie_count"] = len(enabled[0].get("cookies", {})) if enabled else 0
+        add_log("info", "系统", f"账号已删除: {account_id}")
+        _reschedule_job()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/accounts/<account_id>/toggle", methods=["POST"])
+@login_required
+def api_toggle_account(account_id):
+    """启用/禁用账号"""
+    try:
+        from main import update_account, load_accounts
+        data = request.get_json()
+        enabled = data.get("enabled", True)
+        update_account(account_id, enabled=enabled)
+        STATE["accounts"] = load_accounts()
+        status = "启用" if enabled else "禁用"
+        add_log("info", "配置", f"账号已{status}: {account_id}")
+        _reschedule_job()
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
 
 # ============================================================
-# API: 测试 Cookie
+# API: 测试 Cookie (支持指定账号)
 # ============================================================
 @app.route("/api/test-cookie", methods=["POST"])
 @login_required
 def api_test_cookie():
     try:
         import requests as req
-        token_data, _ = _load_token_file()
-        cookies = token_data.get("cookies", {})
-        token = token_data.get("access_token", "")
+        from main import load_accounts
+        data = request.get_json() or {}
+        account_id = data.get("account_id", "")
+
+        # 如果指定了账号 ID，用该账号；否则用第一个启用的
+        accounts = load_accounts()
+        if account_id:
+            account = next((a for a in accounts if a["id"] == account_id), None)
+        else:
+            enabled = [a for a in accounts if a.get("enabled", True)]
+            account = enabled[0] if enabled else None
+
+        if not account:
+            return jsonify({"valid": False, "error": "未找到账号"})
+
+        cookies = account.get("cookies", {})
+        token = account.get("access_token", "")
+        user_id = account.get("user_id", "")
+        label = account.get("label", "")
 
         if not token and not cookies:
-            return jsonify({"valid": False, "error": "未找到已保存的 Cookie，请先添加账号"})
+            return jsonify({"valid": False, "error": "该账号无 Cookie"})
 
-        # 用 cookie 访问 PDD 验证登录态
         headers = {
             "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
             "Referer": "https://mobile.yangkeduo.com/",
         }
         resp = req.get(
             "https://mobile.yangkeduo.com/",
-            cookies=cookies,
-            headers=headers,
-            timeout=10,
-            allow_redirects=False,
+            cookies=cookies, headers=headers, timeout=10, allow_redirects=False,
         )
-
-        # 检查响应：如果返回 302 到 login 页，说明 cookie 失效
         if resp.status_code in (301, 302):
             location = resp.headers.get("Location", "")
             if "login" in location:
-                return jsonify({"valid": False, "error": "Cookie 已过期，被重定向到登录页"})
+                return jsonify({"valid": False, "error": f"[{label}] Cookie 已过期"})
 
-        # 尝试访问 API 获取用户信息
         resp2 = req.get(
-            f"https://mobile.yangkeduo.com/proxy/api/api/server/_stm?pdduid={token_data.get('user_id', '')}",
-            cookies=cookies,
-            headers=headers,
-            timeout=10,
+            f"https://mobile.yangkeduo.com/proxy/api/api/server/_stm?pdduid={user_id}",
+            cookies=cookies, headers=headers, timeout=10,
         )
-
         if resp2.status_code == 200:
-            # Cookie 基本有效
-            user_id = token_data.get("user_id", cookies.get("pdd_user_id", "-"))
-            return jsonify({
-                "valid": True,
-                "user_id": user_id,
-                "nickname": f"用户 {user_id}",
-            })
+            return jsonify({"valid": True, "user_id": user_id, "nickname": f"{label} ({user_id})"})
         else:
-            return jsonify({
-                "valid": resp.status_code == 200,
-                "error": f"API 返回状态码 {resp2.status_code}，Cookie 可能已失效",
-            })
-
-    except ImportError:
-        return jsonify({"valid": False, "error": "需要安装 requests 库: pip install requests"})
+            return jsonify({"valid": False, "error": f"[{label}] API 返回 {resp2.status_code}"})
     except Exception as e:
         return jsonify({"valid": False, "error": f"测试失败: {str(e)}"})
 

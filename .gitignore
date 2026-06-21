@@ -8,3 +8,5 @@ venv/
 .DS_Store
 .pdd_token
 .credentials.json
+.pdd_accounts.json
+*.png

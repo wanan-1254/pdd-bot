@@ -79,15 +79,21 @@ def register_auth_routes(app):
     def login_page():
         if request.method == "POST":
             data = request.get_json(silent=True) or {}
+            username = data.get("username", "").strip()
             password = data.get("password", "")
-            if verify_password(password):
-                session["logged_in"] = True
-                return jsonify({"success": True})
-            return jsonify({"success": False, "error": "密码错误"})
+            # 同时验证用户名和密码
+            creds = load_credentials()
+            if username != creds.get("username", DEFAULT_USERNAME):
+                return jsonify({"success": False, "error": "账号错误"})
+            if not verify_password(password):
+                return jsonify({"success": False, "error": "密码错误"})
+            session["logged_in"] = True
+            return jsonify({"success": True})
 
         # GET: 已登录则跳转面板
         if session.get("logged_in"):
             return redirect("/")
+        # 不暴露用户名给前端
         return Response(LOGIN_HTML, content_type="text/html; charset=utf-8")
 
     @app.route("/api/logout", methods=["POST"])
@@ -123,9 +129,10 @@ def register_auth_routes(app):
         """Railway 健康检查"""
         return jsonify({"status": "ok"})
 
-    @app.route("/api/login-username")
-    def api_login_username():
-        """返回当前登录用户名"""
+    @app.route("/api/get-login-info")
+    @login_required
+    def api_login_info():
+        """返回当前登录信息（已登录才能调用）"""
         return jsonify({"username": get_username()})
 
     @app.before_request
@@ -186,6 +193,7 @@ body {
   font-size: 15px; font-family: inherit;
   transition: border-color 0.2s;
   background: #F9FAFB; color: #1F2937;
+  autocomplete: off;
 }
 .form-input:focus {
   outline: none; border-color: #EF4444;
@@ -218,16 +226,16 @@ body {
     <div class="logo">
       <div class="logo-icon">🎯</div>
       <h1>拼多多抢券 Bot</h1>
-      <p>请输入管理员密码登录</p>
+      <p>请输入账号和密码登录</p>
     </div>
     <form onsubmit="return doLogin()">
       <div class="form-group">
         <label class="form-label">账号</label>
-        <input class="form-input" id="username" type="text" value="admin" readonly>
+        <input class="form-input" id="username" type="text" placeholder="请输入登录账号" autocomplete="new-username" autofocus>
       </div>
       <div class="form-group">
         <label class="form-label">密码</label>
-        <input class="form-input" id="password" type="password" placeholder="输入密码" autofocus>
+        <input class="form-input" id="password" type="password" placeholder="请输入登录密码" autocomplete="new-password">
       </div>
       <button class="btn" type="submit" id="submitBtn">登 录</button>
     </form>
@@ -237,8 +245,23 @@ body {
 </div>
 
 <script>
+// 防止浏览器自动填充
+if (document.addEventListener) {
+  document.addEventListener('DOMContentLoaded', function() {
+    var u = document.getElementById('username');
+    var p = document.getElementById('password');
+    if (u) { u.value = ''; u.autocomplete = 'off'; }
+    if (p) { p.value = ''; p.autocomplete = 'off'; }
+  });
+}
+
 async function doLogin() {
+  const user = document.getElementById('username').value.trim();
   const pw = document.getElementById('password').value;
+  if (!user) {
+    showError('请输入账号');
+    return false;
+  }
   if (!pw) {
     showError('请输入密码');
     return false;
@@ -251,13 +274,13 @@ async function doLogin() {
     const r = await fetch('/login', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({password: pw})
+      body: JSON.stringify({username: user, password: pw})
     });
     const d = await r.json();
     if (d.success) {
       window.location.href = '/';
     } else {
-      showError(d.error || '密码错误');
+      showError(d.error || '账号或密码错误');
     }
   } catch(e) {
     showError('网络错误: ' + e.message);

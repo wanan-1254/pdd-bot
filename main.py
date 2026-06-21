@@ -43,6 +43,8 @@ class DashboardLogHandler(logging.Handler):
                 module = "NTP"
             elif "抢券" in msg or "点击" in msg or "开火" in msg or "浏览器" in msg:
                 module = "抢券"
+            elif "签到" in msg or "打卡" in msg:
+                module = "签到"
             elif "Token" in msg or "Cookie" in msg or "登录" in msg:
                 module = "登录"
             elif "配置" in msg or "目标" in msg or "调度器" in msg:
@@ -84,8 +86,9 @@ COUPON_URL = os.getenv("COUPON_URL",
     "&refer_page_name=deposit&refer_page_id=10089"
 )
 
-# --- Token 文件 ---
-TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pdd_token")
+# --- 账号文件 ---
+ACCOUNTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pdd_accounts.json")
+TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pdd_token")  # 兼容旧文件
 
 # 北京时间时区
 BJT = timezone(timedelta(hours=8))
@@ -277,18 +280,149 @@ def now_bjt() -> datetime:
 
 
 # ============================================================
-# Token 加载
+# 多账号存储层
 # ============================================================
-def load_token_data() -> dict:
-    """从 .pdd_token 加载 Token 和 Cookies"""
+_default_config = {
+    "grab_hour": GRAB_HOUR, "grab_minute": GRAB_MINUTE, "grab_second": GRAB_SECOND,
+    "pre_start_sec": PRE_START_SEC,
+    "end_hour": END_HOUR, "end_minute": END_MINUTE, "end_second": END_SECOND,
+    "thread_count": THREAD_COUNT,
+}
+
+
+def _migrate_old_token():
+    """迁移旧的 .pdd_token 单账号文件到新的多账号格式"""
     if not os.path.exists(TOKEN_FILE):
-        return {}
+        return
+    if os.path.exists(ACCOUNTS_FILE):
+        return  # 已有账号文件，不迁移
     try:
         with open(TOKEN_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        if data.get("access_token") or data.get("cookies"):
+            account = {
+                "id": f"acc_{int(time.time())}",
+                "label": "默认账号",
+                "access_token": data.get("access_token", ""),
+                "user_id": data.get("user_id", ""),
+                "cookies": data.get("cookies", {}),
+                "enabled": True,
+                "config": dict(_default_config),
+                "saved_at": data.get("saved_at", datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S")),
+            }
+            save_accounts([account])
+            logger.info("已迁移旧账号数据到多账号格式")
     except Exception as e:
-        logger.warning(f"加载 .pdd_token 失败: {e}")
-        return {}
+        logger.warning(f"迁移旧 Token 失败: {e}")
+
+
+def load_accounts() -> list:
+    """加载账号列表"""
+    _migrate_old_token()
+    if not os.path.exists(ACCOUNTS_FILE):
+        return []
+    try:
+        with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+            accounts = json.load(f)
+        # 迁移: 确保每个账号都有 sign_in 字段
+        need_save = False
+        for acc in accounts:
+            if "sign_in" not in acc:
+                acc["sign_in"] = {
+                    "finish_count": 0,
+                    "gain_award_count": 0,
+                    "display_status": 0,
+                    "last_check": "",
+                    "auto_sign_in": True,
+                }
+                need_save = True
+        if need_save:
+            save_accounts(accounts)
+        return accounts
+    except Exception as e:
+        logger.warning(f"加载账号列表失败: {e}")
+        return []
+
+
+def save_accounts(accounts: list):
+    """保存账号列表"""
+    try:
+        with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(accounts, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"保存账号列表失败: {e}")
+
+
+def add_account(access_token: str, user_id: str = "", cookies: dict = None,
+                label: str = "", config: dict = None) -> dict:
+    """新增账号"""
+    accounts = load_accounts()
+    account = {
+        "id": f"acc_{int(time.time() * 1000)}",
+        "label": label or f"账号{len(accounts) + 1}",
+        "access_token": access_token,
+        "user_id": user_id,
+        "cookies": cookies or {"PDDAccessToken": access_token},
+        "enabled": True,
+        "config": config or dict(_default_config),
+        "sign_in": {
+            "finish_count": 0,
+            "gain_award_count": 0,
+            "display_status": 0,
+            "last_check": "",
+            "auto_sign_in": True,
+        },
+        "saved_at": datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    accounts.append(account)
+    save_accounts(accounts)
+    return account
+
+
+def update_account(account_id: str, **kwargs) -> dict:
+    """更新账号"""
+    accounts = load_accounts()
+    for acc in accounts:
+        if acc["id"] == account_id:
+            for k, v in kwargs.items():
+                if k in ("label", "access_token", "user_id", "cookies", "enabled", "config", "sign_in"):
+                    acc[k] = v
+            save_accounts(accounts)
+            return acc
+    return {}
+
+
+def delete_account(account_id: str):
+    """删除账号"""
+    accounts = load_accounts()
+    accounts = [a for a in accounts if a["id"] != account_id]
+    save_accounts(accounts)
+
+
+def get_enabled_accounts() -> list:
+    """获取所有启用的账号"""
+    return [a for a in load_accounts() if a.get("enabled", True)]
+
+
+def load_token_data() -> dict:
+    """兼容旧接口: 返回第一个启用账号的数据"""
+    accounts = load_accounts()
+    enabled = [a for a in accounts if a.get("enabled", True)]
+    if enabled:
+        acc = enabled[0]
+        return {
+            "access_token": acc.get("access_token", ""),
+            "user_id": acc.get("user_id", ""),
+            "cookies": acc.get("cookies", {}),
+        }
+    # 兆底：尝试读旧文件
+    if os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
 
 
 # sync_time() 和 start_continuous_sync() 在 main() 中调用，
@@ -296,113 +430,318 @@ def load_token_data() -> dict:
 
 
 # ============================================================
+# PDD 签到 API 集成
+# ============================================================
+_PDD_TASK_ID = "MT829143858423691176"
+_PDD_TASK_TEMPLATE_ID = "1"
+_PDD_QUERY_URL = "https://mobile.yangkeduo.com/proxy/api/api/aurum/check_in/task/query"
+_PDD_SIGN_URL = "https://mobile.yangkeduo.com/proxy/api/api/aurum/check_in/task/sub_task/finish"
+
+
+def _make_pdd_session(account: dict):
+    """为指定账号创建已认证的 PDD HTTP Session"""
+    from pdd_token import generate_anti_content
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
+        "Referer": "https://mobile.yangkeduo.com/charge_sign_coupon.html?source=deposit",
+        "Origin": "https://mobile.yangkeduo.com",
+        "Content-Type": "application/json;charset=UTF-8",
+    })
+    s.cookies.update(account.get("cookies", {}))
+    return s
+
+
+def query_sign_in_status(account: dict) -> dict:
+    """
+    查询账号的签到状态。
+    返回: {success, finish_count, gain_award_count, display_status, can_sign, can_grab, raw_result}
+    """
+    from pdd_token import generate_anti_content
+    user_id = account.get("user_id", "") or account.get("cookies", {}).get("pdd_user_id", "")
+    session = _make_pdd_session(account)
+
+    try:
+        anti_token = generate_anti_content(int(time.time() * 1000))
+        session.headers["anti-content"] = anti_token
+        resp = session.post(_PDD_QUERY_URL, json={
+            "task_id": _PDD_TASK_ID,
+            "task_template_id": _PDD_TASK_TEMPLATE_ID,
+            "source": "deposit",
+            "pdduid": user_id,
+            "request_source": 1,
+        }, timeout=10)
+
+        data = resp.json()
+        if not data.get("success"):
+            return {"success": False, "error": data.get("errorMsg", "查询失败")}
+
+        result = data.get("result", {})
+        finish_count = result.get("finish_count", 0)
+        gain_award_count = result.get("gain_award_count", 0)
+        display_status = result.get("display_status", 0)
+
+        # 判断能否签到
+        sub_tasks = result.get("sub_task_list", [])
+        can_sign = False
+        if sub_tasks:
+            btn = sub_tasks[0].get("check_in_button", {})
+            can_sign = btn.get("can_click", False)
+
+        # 判断能否抢券: 签到满5天且未领取
+        can_grab = finish_count >= 5 and gain_award_count < finish_count
+
+        return {
+            "success": True,
+            "finish_count": finish_count,
+            "gain_award_count": gain_award_count,
+            "display_status": display_status,
+            "can_sign": can_sign,
+            "can_grab": can_grab,
+            "task_name": result.get("task_name", ""),
+            "raw_result": result,
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def perform_sign_in(account: dict) -> dict:
+    """
+    执行每日签到。
+    返回: {success, message}
+    """
+    from pdd_token import generate_anti_content
+    user_id = account.get("user_id", "") or account.get("cookies", {}).get("pdd_user_id", "")
+    session = _make_pdd_session(account)
+
+    try:
+        anti_token = generate_anti_content(int(time.time() * 1000))
+        session.headers["anti-content"] = anti_token
+        resp = session.post(_PDD_SIGN_URL, json={
+            "task_id": _PDD_TASK_ID,
+            "task_template_id": _PDD_TASK_TEMPLATE_ID,
+            "source": "deposit",
+            "pdduid": user_id,
+            "request_source": 1,
+        }, timeout=10)
+
+        data = resp.json()
+        if data.get("success"):
+            return {"success": True, "message": "签到成功"}
+        else:
+            err = data.get("errorMsg", "签到失败")
+            code = data.get("errorCode", "")
+            return {"success": False, "message": f"{err} (code: {code})"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+def refresh_account_sign_in(account_id: str) -> dict:
+    """查询并更新指定账号的签到状态"""
+    accounts = load_accounts()
+    acc = next((a for a in accounts if a["id"] == account_id), None)
+    if not acc:
+        return {"success": False, "error": "账号不存在"}
+
+    status = query_sign_in_status(acc)
+    if status["success"]:
+        sign_in = acc.get("sign_in", {})
+        sign_in["finish_count"] = status["finish_count"]
+        sign_in["gain_award_count"] = status["gain_award_count"]
+        sign_in["display_status"] = status["display_status"]
+        sign_in["last_check"] = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S")
+        sign_in["can_sign"] = status["can_sign"]
+        sign_in["can_grab"] = status["can_grab"]
+        acc["sign_in"] = sign_in
+        save_accounts(accounts)
+        STATE["accounts"] = load_accounts()
+    return status
+
+
+def auto_sign_in_all():
+    """为所有启用且开启自动签到的账号执行签到"""
+    accounts = get_enabled_accounts()
+    results = []
+    for acc in accounts:
+        sign_in = acc.get("sign_in", {})
+        if not sign_in.get("auto_sign_in", True):
+            continue
+        label = acc.get("label", acc["id"])
+
+        # 先查询状态
+        status = query_sign_in_status(acc)
+        if not status["success"]:
+            logger.warning(f"[签到] [{label}] 查询失败: {status.get('error')}")
+            results.append({"label": label, "action": "查询失败"})
+            continue
+
+        # 更新缓存的签到状态
+        sign_in["finish_count"] = status["finish_count"]
+        sign_in["gain_award_count"] = status["gain_award_count"]
+        sign_in["display_status"] = status["display_status"]
+        sign_in["last_check"] = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S")
+        sign_in["can_sign"] = status["can_sign"]
+        sign_in["can_grab"] = status["can_grab"]
+
+        if status["can_sign"]:
+            # 执行签到
+            result = perform_sign_in(acc)
+            if result["success"]:
+                logger.info(f"[签到] [{label}] 签到成功! ({status['finish_count']+1}/5天)")
+                sign_in["finish_count"] = status["finish_count"] + 1
+                results.append({"label": label, "action": "签到成功"})
+            else:
+                logger.warning(f"[签到] [{label}] 签到失败: {result['message']}")
+                results.append({"label": label, "action": f"签到失败: {result['message']}"})
+        elif status["can_grab"]:
+            logger.info(f"[签到] [{label}] 已满5天可抢券 ({status['finish_count']}/5天)")
+            results.append({"label": label, "action": "可抢券"})
+        elif status["display_status"] == 40:
+            logger.info(f"[签到] [{label}] 已领取，等待新周期 ({status['finish_count']}/5天)")
+            results.append({"label": label, "action": "已领取"})
+        else:
+            logger.info(f"[签到] [{label}] 今日已签到 ({status['finish_count']}/5天)")
+            results.append({"label": label, "action": "今日已签到"})
+
+        # 保存更新的签到状态
+        update_account(acc["id"], sign_in=sign_in)
+
+    # 更新面板 STATE
+    STATE["accounts"] = load_accounts()
+    return results
+
+
+def auto_query_all_sign_in():
+    """每2小时自动查询所有账号的签到状态"""
+    accounts = load_accounts()
+    if not accounts:
+        return
+
+    logger.info(f"[自动查询] 开始查询 {len(accounts)} 个账号的签到状态...")
+    for acc in accounts:
+        label = acc.get("label", acc["id"])
+        status = query_sign_in_status(acc)
+        if status["success"]:
+            sign_in = acc.get("sign_in", {})
+            old_ds = sign_in.get("display_status", 0)
+            new_ds = status["display_status"]
+
+            sign_in["finish_count"] = status["finish_count"]
+            sign_in["gain_award_count"] = status["gain_award_count"]
+            sign_in["display_status"] = new_ds
+            sign_in["last_check"] = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S")
+            sign_in["can_sign"] = status["can_sign"]
+            sign_in["can_grab"] = status["can_grab"]
+
+            # 检测新周期: 之前是已领取(40)，现在变了
+            if old_ds == 40 and new_ds != 40:
+                logger.info(f"[自动查询] [{label}] 检测到新周期开始! (旧状态=40 -> 新状态={new_ds})")
+
+            update_account(acc["id"], sign_in=sign_in)
+            fc = status["finish_count"]
+            gc = status["gain_award_count"]
+            can_grab = "可抢券" if status["can_grab"] else "不可抢券"
+            can_sign = "可签到" if status["can_sign"] else ""
+            logger.info(f"[自动查询] [{label}] 签到{fc}/5天 | 领奖{gc}次 | {can_grab} {can_sign}")
+        else:
+            logger.warning(f"[自动查询] [{label}] 查询失败: {status.get('error')}")
+
+    # 更新面板 STATE
+    STATE["accounts"] = load_accounts()
+    logger.info("[自动查询] 查询完成")
+
+
+# ============================================================
 # Playwright 抢券核心
 # ============================================================
 def run_grab_session():
     """
-    抢券流程 (直接 HTTP API，持续点击窗口模式):
-    1. 时间同步 + 加载 Cookie
-    2. 精确等待到 开始时间 (目标时间 - 提前秒数)
-    3. 多线程持续发送抢券请求，直到 结束时间
+    抢券流程 (多账号并发模式):
+    1. 时间同步 + 加载所有启用账号
+    2. 每个账号独立线程，按各自配置的时间窗口抢券
+    3. 任一账号成功即停止所有线程
     4. 汇总结果
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from pdd_token import generate_anti_content
     import threading as _threading
-
-    # 从 STATE 读取配置
-    grab_hour = STATE.get("grab_hour", GRAB_HOUR)
-    grab_minute = STATE.get("grab_minute", GRAB_MINUTE)
-    grab_second = STATE.get("grab_second", GRAB_SECOND)
-    pre_start_sec = STATE.get("pre_start_sec", PRE_START_SEC)
-    end_hour = STATE.get("end_hour", END_HOUR)
-    end_minute = STATE.get("end_minute", END_MINUTE)
-    end_second = STATE.get("end_second", END_SECOND)
-    thread_count = STATE.get("thread_count", THREAD_COUNT)
-
-    logger.info("=" * 55)
-    logger.info("开始抢券流程 (持续点击窗口模式)")
-    logger.info(f"目标: {grab_hour:02d}:{grab_minute:02d}:{grab_second:02d} "
-                f"提前 {pre_start_sec}s 开始 | 结束: {end_hour:02d}:{end_minute:02d}:{end_second:02d} "
-                f"| {thread_count} 线程")
-    logger.info("=" * 55)
-
-    STATE["status"] = "grabbing"
+    from pdd_token import generate_anti_content
 
     # 1. 时间同步
     sync_time()
     logger.info(f"时间源: {TIME_SOURCE} | 偏移: {get_time_offset()*1000:+.2f}ms")
 
-    # 2. 加载 Cookie/Token
-    token_data = load_token_data()
-    cookies = token_data.get("cookies", {})
-    access_token = token_data.get("access_token", "")
-
-    if not cookies:
-        logger.error("没有 Cookie，请先运行 python login.py")
+    # 2. 加载启用账号 + 检查签到资格
+    accounts = get_enabled_accounts()
+    if not accounts:
+        logger.error("没有启用的账号")
         STATE["status"] = "failed"
-        add_history(False, "没有 Cookie")
+        add_history(False, "没有启用的账号")
         return
 
-    logger.info(f"Cookie: {len(cookies)}个 | AccessToken: {access_token[:20]}...")
+    # 检查签到状态，过滤除不可抢券的账号
+    eligible_accounts = []
+    for acc in accounts:
+        label = acc.get("label", acc["id"])
+        # 抢券前始终从 PDD 刷新最新签到状态
+        logger.info(f"[{label}] 查询签到状态...")
+        status = query_sign_in_status(acc)
+        si = acc.get("sign_in", {})
+        if status["success"]:
+            si["finish_count"] = status["finish_count"]
+            si["gain_award_count"] = status["gain_award_count"]
+            si["display_status"] = status["display_status"]
+            si["can_sign"] = status["can_sign"]
+            si["can_grab"] = status["can_grab"]
+            si["last_check"] = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S")
+            update_account(acc["id"], sign_in=si)
+        else:
+            logger.warning(f"[{label}] 查询签到状态失败: {status.get('error')}，使用缓存数据")
 
-    # 3. 计算时间窗口
-    now = now_bjt()
-    target = now.replace(hour=grab_hour, minute=grab_minute, second=grab_second, microsecond=0)
-    end_time = now.replace(hour=end_hour, minute=end_minute, second=end_second, microsecond=0)
+        # 检查是否可抢券
+        fc = si.get("finish_count", 0)
+        gc = si.get("gain_award_count", 0)
+        ds = si.get("display_status", 0)
 
-    # 如果目标时间已过超过5秒，等明天（容错窗口防止调度器延迟）
-    grace = timedelta(seconds=5)
-    if now >= target + grace:
-        target = target + timedelta(days=1)
-        end_time = end_time + timedelta(days=1)
-        logger.info(f"今日目标时间已过 ({now:%H:%M:%S} >= {target:%H:%M:%S})，等待明日")
+        if ds == 40:
+            logger.warning(f"[{label}] 已领取过优惠券，需重新签到5天才能抢券 (跳过)")
+            continue
+        elif fc >= 5 and gc < fc:
+            logger.info(f"[{label}] 签到{fc}天 ✅ 可抢券")
+            eligible_accounts.append(acc)
+        elif fc >= 5:
+            logger.warning(f"[{label}] 签到{fc}天但已领奖 (跳过)")
+            continue
+        else:
+            logger.warning(f"[{label}] 签到{fc}/5天，不满5天不可抢券 (跳过)")
+            continue
 
-    # 开始时间 = 目标时间 - 提前秒数
-    start_time = target - timedelta(seconds=pre_start_sec)
+    if not eligible_accounts:
+        logger.error("没有可抢券的账号 (需签到满5天)")
+        STATE["status"] = "failed"
+        add_history(False, "无可抢券账号(签到不满5天)")
+        return
 
-    # 如果结束时间小于开始时间 (跨天)
-    if end_time <= start_time:
-        end_time = end_time + timedelta(days=1)
+    accounts = eligible_accounts
+    logger.info(f"可抢券账号: {len(accounts)} 个")
 
-    window_sec = (end_time - start_time).total_seconds()
-    logger.info(f"点击窗口: {start_time.strftime('%H:%M:%S')} ~ {end_time.strftime('%H:%M:%S')} "
-                f"({window_sec:.0f}秒)")
+    logger.info("=" * 55)
+    logger.info(f"开始抢券流程 (多账号并发模式 | {len(accounts)} 个账号)")
+    for acc in accounts:
+        cfg = acc.get("config", {})
+        logger.info(f"  [{acc['label']}] "
+                    f"目标 {cfg.get('grab_hour',0):02d}:{cfg.get('grab_minute',0):02d}:{cfg.get('grab_second',0):02d} "
+                    f"提前{cfg.get('pre_start_sec',10)}s "
+                    f"结束 {cfg.get('end_hour',0):02d}:{cfg.get('end_minute',0):02d}:{cfg.get('end_second',30):02d} "
+                    f"{cfg.get('thread_count',5)}线程")
+    logger.info("=" * 55)
 
-    # 预留 3 秒给 Token 预生成
-    token_buffer = 3.0
-    wait_until = start_time - timedelta(seconds=token_buffer)
+    STATE["status"] = "grabbing"
 
-    logger.info(f"当前时间: {now.strftime('%H:%M:%S.%f')[:-3]}")
-    logger.info(f"等待至:   {wait_until.strftime('%H:%M:%S.%f')[:-3]} (预留 {token_buffer}s)")
-
-    # SKIP_WAIT 跳过等待 (测试用)
+    # 全局成功标志
+    grab_success = _threading.Event()
+    account_results = {}  # {account_id: {success, detail, total_requests}}
+    results_lock = _threading.Lock()
     skip_wait = os.getenv("SKIP_WAIT", "false").lower() == "true"
-    if skip_wait:
-        logger.info("SKIP_WAIT=true, 跳过等待")
-    else:
-        while True:
-            remaining = (wait_until - now_bjt()).total_seconds()
-            if remaining <= 0:
-                break
-            if remaining > 1.0:
-                time.sleep(min(remaining - 0.5, 60))
-            elif remaining > 0.01:
-                time.sleep(0.001)
 
-    # 4. busy-wait 到精确开始时间
-    if not skip_wait:
-        while True:
-            remaining = (start_time - now_bjt()).total_seconds()
-            if remaining <= 0:
-                break
-            if remaining > 0.001:
-                time.sleep(0.0001)
-
-    fire_time = now_bjt()
-    logger.info(f"开火! {fire_time.strftime('%H:%M:%S.%f')[:-3]}")
-
-    # 5. 多线程持续发送抢券请求
     api_url = "https://mobile.yangkeduo.com/proxy/api/api/aurum/check_in/task/gain/award"
     base_headers = {
         "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
@@ -412,133 +751,185 @@ def run_grab_session():
         "Referer": "https://mobile.yangkeduo.com/charge_sign_coupon.html",
         "Origin": "https://mobile.yangkeduo.com",
     }
-
     task_id = os.getenv("PDD_TASK_ID", "MT829143858423691176")
     task_template_id = os.getenv("PDD_TASK_TEMPLATE_ID", "1")
 
-    session = requests.Session()
-    session.headers.update(base_headers)
-    session.cookies.update(cookies)
+    def account_grab_worker(account):
+        """单个账号的抢券线程"""
+        acc_id = account["id"]
+        acc_label = account.get("label", acc_id)
+        cookies = account.get("cookies", {})
+        cfg = account.get("config", {})
 
-    # 停止标志
-    stop_event = _threading.Event()
-    results = []
-    results_lock = _threading.Lock()
-    total_requests = [0]  # 用列表以便在线程中修改
+        grab_h = cfg.get("grab_hour", 0)
+        grab_m = cfg.get("grab_minute", 0)
+        grab_s = cfg.get("grab_second", 0)
+        pre_sec = cfg.get("pre_start_sec", 10)
+        end_h = cfg.get("end_hour", 0)
+        end_m = cfg.get("end_minute", 0)
+        end_s = cfg.get("end_second", 30)
+        t_count = cfg.get("thread_count", 5)
 
-    def worker(thread_id):
-        """单个工作线程: 持续发送请求直到 stop_event"""
-        count = 0
-        while not stop_event.is_set():
-            t0 = time.time()
-            try:
-                # 每次请求生成新的 anti_content token
-                anti_token = generate_anti_content(
-                    int(time.time() * 1000 + get_time_offset() * 1000)
-                )
-                h = {"anti-content": anti_token}
-                payload = {
-                    "request_source": 1,
-                    "anti_content": anti_token,
-                    "task_id": task_id,
-                    "task_template_id": task_template_id,
-                }
-                resp = session.post(api_url, json=payload, headers=h, timeout=3)
-                elapsed = (time.time() - t0) * 1000
-                data = resp.json()
-                count += 1
-                result = {"idx": count, "thread": thread_id, "status": resp.status_code,
-                          "data": data, "elapsed": elapsed}
-                with results_lock:
-                    results.append(result)
-                    total_requests[0] += 1
-                if count % 5 == 0:
-                    # 提取返回内容摘要
-                    data_str = json.dumps(data, ensure_ascii=False)[:120]
-                    logger.info(f"[线程-{thread_id}] #{count} ({elapsed:.0f}ms): "
-                                f"status={resp.status_code} | {data_str}")
-            except Exception as e:
-                elapsed = (time.time() - t0) * 1000
-                with results_lock:
-                    total_requests[0] += 1
-                logger.warning(f"[线程-{thread_id}] 失败 ({elapsed:.0f}ms): {e}")
+        tag = f"[{acc_label}]"
 
-    # 启动工作线程
-    threads = []
-    for i in range(thread_count):
-        t = _threading.Thread(target=worker, args=(i,))
-        t.daemon = True
-        threads.append(t)
-        t.start()
+        # 计算时间窗口
+        now = now_bjt()
+        target = now.replace(hour=grab_h, minute=grab_m, second=grab_s, microsecond=0)
+        end_time = now.replace(hour=end_h, minute=end_m, second=end_s, microsecond=0)
 
-    logger.info(f"{thread_count} 个工作线程已启动，持续发送直到 {end_time.strftime('%H:%M:%S')}")
+        grace = timedelta(seconds=5)
+        if now >= target + grace:
+            target += timedelta(days=1)
+            end_time += timedelta(days=1)
 
-    # 等待结束时间
-    if not skip_wait:
-        while True:
-            remaining = (end_time - now_bjt()).total_seconds()
-            if remaining <= 0:
-                break
-            if remaining > 0.5:
-                time.sleep(0.1)
-            elif remaining > 0.001:
-                time.sleep(0.001)
-    else:
-        # 测试模式: 发送 5 秒
-        time.sleep(5)
+        start_time = target - timedelta(seconds=pre_sec)
+        if end_time <= start_time:
+            end_time += timedelta(days=1)
 
-    # 停止所有线程
-    stop_event.set()
-    for t in threads:
-        t.join(timeout=3)
+        logger.info(f"{tag} 窗口: {start_time:%H:%M:%S} ~ {end_time:%H:%M:%S}")
 
-    session.close()
+        # 等待开始时间
+        if not skip_wait:
+            while True:
+                remaining = (start_time - now_bjt()).total_seconds()
+                if remaining <= 0:
+                    break
+                if grab_success.is_set():
+                    logger.info(f"{tag} 其他账号已成功，停止等待")
+                    with results_lock:
+                        account_results[acc_id] = {"success": False, "detail": "被其他账号抢先", "total_requests": 0}
+                    return
+                if remaining > 1.0:
+                    time.sleep(min(remaining - 0.5, 60))
+                elif remaining > 0.001:
+                    time.sleep(0.001)
 
-    logger.info(f"点击窗口结束! 共发送 {total_requests[0]} 个请求")
+        logger.info(f"{tag} 开火! {now_bjt():%H:%M:%S.%f}")
 
-    # 6. 分析结果
-    success = False
-    detail = ""
-    if results:
-        for r in sorted(results, key=lambda x: x.get("elapsed", 999)):
-            data = r.get("data", {})
-            if data.get("success") or data.get("error_code") == 0:
-                logger.info(f"*** 抢券成功! *** 线程-{r.get('thread',0)} #{r['idx']}: "
-                            f"{json.dumps(data, ensure_ascii=False)[:200]}")
-                success = True
-                detail = "抢券成功!"
-                break
+        # 创建 HTTP Session
+        session = requests.Session()
+        session.headers.update(base_headers)
+        session.cookies.update(cookies)
 
-        if not success:
-            # 查找有意义的错误信息
+        stop_event = _threading.Event()
+        results = []
+        r_lock = _threading.Lock()
+        total_req = [0]
+
+        def worker(tid):
+            """工作子线程"""
+            count = 0
+            while not stop_event.is_set() and not grab_success.is_set():
+                t0 = time.time()
+                try:
+                    anti_token = generate_anti_content(
+                        int(time.time() * 1000 + get_time_offset() * 1000)
+                    )
+                    h = {"anti-content": anti_token}
+                    payload = {
+                        "request_source": 1,
+                        "anti_content": anti_token,
+                        "task_id": task_id,
+                        "task_template_id": task_template_id,
+                    }
+                    resp = session.post(api_url, json=payload, headers=h, timeout=3)
+                    elapsed = (time.time() - t0) * 1000
+                    data = resp.json()
+                    count += 1
+                    with r_lock:
+                        results.append({"idx": count, "thread": tid, "data": data, "elapsed": elapsed})
+                        total_req[0] += 1
+                    # 检查是否成功
+                    if data.get("success") or data.get("error_code") == 0:
+                        logger.info(f"{tag} *** 抢券成功! *** 线程-{tid} #{count}")
+                        grab_success.set()
+                        stop_event.set()
+                        return
+                    if count % 10 == 0:
+                        logger.info(f"{tag} 线程-{tid} 已发{count}个请求")
+                except Exception as e:
+                    with r_lock:
+                        total_req[0] += 1
+
+        # 启动子线程
+        threads = []
+        for i in range(t_count):
+            t = _threading.Thread(target=worker, args=(i,), daemon=True)
+            threads.append(t)
+            t.start()
+
+        # 等待结束时间或成功标志
+        if not skip_wait:
+            while True:
+                if grab_success.is_set() and stop_event.is_set():
+                    break
+                remaining = (end_time - now_bjt()).total_seconds()
+                if remaining <= 0:
+                    break
+                if remaining > 0.5:
+                    time.sleep(0.1)
+                elif remaining > 0.001:
+                    time.sleep(0.001)
+        else:
+            # 测试模式: 发送 5 秒
+            time.sleep(5)
+
+        # 停止子线程
+        stop_event.set()
+        for t in threads:
+            t.join(timeout=3)
+        session.close()
+
+        # 分析结果
+        success = grab_success.is_set() and any(
+            r.get("data", {}).get("success") or r.get("data", {}).get("error_code") == 0
+            for r in results
+        )
+        detail = ""
+        if success:
+            detail = f"{tag} 抢券成功!"
+        elif results:
             for r in results:
                 data = r.get("data", {})
                 err = str(data.get("error_msg", "")) + str(data.get("errorMsg", ""))
                 if any(kw in err for kw in ["已领完", "已抢完", "库存不足", "今日已领"]):
-                    detail = err[:100]
-                    logger.warning(f"券已抢完: {err}")
+                    detail = f"{tag} {err[:80]}"
                     break
             if not detail:
-                # 有结果但没成功也没特殊错误
-                errors = [r.get("error", "") for r in results if r.get("error")]
-                if errors:
-                    detail = f"请求失败: {errors[0][:80]}"
-                elif results:
-                    detail = f"未抢到券 (已发 {total_requests[0]} 个请求, 均返回非成功)"
-    if not detail:
-        if not results:
-            detail = f"无有效响应 (已发 {total_requests[0]} 个请求)"
+                detail = f"{tag} 未抢到 (已发{total_req[0]}个请求)"
         else:
-            detail = "未知结果"
+            detail = f"{tag} 无有效响应"
 
-    # 7. 最终结果
-    logger.info(f"抢券结束! 成功: {success} | {detail}")
-    STATE["status"] = "success" if success else "failed"
+        logger.info(f"{tag} 结束: {total_req[0]}个请求 | {detail}")
+        with results_lock:
+            account_results[acc_id] = {
+                "success": success, "detail": detail, "total_requests": total_req[0]
+            }
+
+    # 3. 为每个账号启动独立线程
+    acc_threads = []
+    for acc in accounts:
+        t = _threading.Thread(target=account_grab_worker, args=(acc,), daemon=True)
+        acc_threads.append(t)
+        t.start()
+
+    # 4. 等待所有账号完成或全局成功
+    for t in acc_threads:
+        t.join(timeout=300)  # 最多等 5 分钟
+
+    # 5. 汇总结果
+    any_success = any(r.get("success") for r in account_results.values())
+    total_all = sum(r.get("total_requests", 0) for r in account_results.values())
+    details = [r.get("detail", "") for r in account_results.values() if r.get("detail")]
+    detail = " | ".join(details[:3])  # 最多显示 3 个账号的结果
+
+    logger.info(f"抢券结束! 成功: {any_success} | 总请求: {total_all} | {detail}")
+    STATE["status"] = "success" if any_success else "failed"
     STATE["last_grab_time"] = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S")
     STATE["last_grab_result"] = detail
-    add_history(success, detail)
+    add_history(any_success, detail)
 
-    return success
+    return any_success
 
 
 # ============================================================
@@ -546,6 +937,7 @@ def run_grab_session():
 # ============================================================
 def init_state():
     """初始化 Web 面板状态"""
+    accounts = load_accounts()
     STATE.update({
         "grab_hour": GRAB_HOUR,
         "grab_minute": GRAB_MINUTE,
@@ -557,11 +949,17 @@ def init_state():
         "end_second": END_SECOND,
         "thread_count": THREAD_COUNT,
         "uptime_start": time.time(),
+        "accounts": accounts,
     })
-    token_data = load_token_data()
-    STATE["token_valid"] = bool(token_data.get("access_token"))
-    STATE["user_id"] = token_data.get("user_id", "")
-    STATE["cookie_count"] = len(token_data.get("cookies", {}))
+    enabled = [a for a in accounts if a.get("enabled", True)]
+    if enabled:
+        STATE["token_valid"] = True
+        STATE["user_id"] = enabled[0].get("user_id", "")
+        STATE["cookie_count"] = len(enabled[0].get("cookies", {}))
+    else:
+        STATE["token_valid"] = False
+        STATE["user_id"] = ""
+        STATE["cookie_count"] = 0
 
 
 # 全局调度器引用 (供 dashboard 更新触发时间)
@@ -585,6 +983,40 @@ def update_scheduler_time(hour: int, minute: int, second: int):
         return False
 
 
+def calc_earliest_trigger() -> tuple:
+    """计算所有启用账号中最早的调度触发时间 (hour, minute, second)"""
+    accounts = get_enabled_accounts()
+    if not accounts:
+        # 没有账号时用全局默认值
+        pre = STATE.get("pre_start_sec", PRE_START_SEC)
+        h, m, s = STATE.get("grab_hour", GRAB_HOUR), STATE.get("grab_minute", GRAB_MINUTE), STATE.get("grab_second", GRAB_SECOND)
+        s = s - pre
+        if s < 0:
+            s += 60
+            m -= 1
+            if m < 0:
+                m += 60
+                h = (h - 1) % 24
+        return h, m, s
+
+    earliest_total_sec = None
+    for acc in accounts:
+        cfg = acc.get("config", {})
+        total_sec = (cfg.get("grab_hour", 0) * 3600 +
+                     cfg.get("grab_minute", 0) * 60 +
+                     cfg.get("grab_second", 0) -
+                     cfg.get("pre_start_sec", 10))
+        if total_sec < 0:
+            total_sec += 86400  # 跨天
+        if earliest_total_sec is None or total_sec < earliest_total_sec:
+            earliest_total_sec = total_sec
+
+    h = (earliest_total_sec // 3600) % 24
+    m = (earliest_total_sec % 3600) // 60
+    s = earliest_total_sec % 60
+    return h, m, s
+
+
 # ============================================================
 # 入口
 # ============================================================
@@ -600,18 +1032,16 @@ def main():
     start_dashboard(port)
     logger.info(f"Web 面板已启动: http://0.0.0.0:{port}")
 
-    # 检查 Token
-    token_data = load_token_data()
-    if not token_data.get("cookies"):
-        logger.warning("未找到有效 Token，请先运行: python login.py")
-        try:
-            from login import qrcode_login
-            qrcode_login()
-        except Exception as e:
-            logger.error(f"登录失败: {e}")
-            sys.exit(1)
+    # 检查账号
+    accounts = get_enabled_accounts()
+    if not accounts:
+        logger.warning("未找到有效账号，请通过 Web 面板添加账号")
+        logger.info("Web 面板地址: http://0.0.0.0:8080")
+    else:
+        logger.info(f"已加载 {len(accounts)} 个启用账号")
+        for acc in accounts:
+            logger.info(f"  - {acc.get('label', '未命名')}: Cookie {len(acc.get('cookies', {}))}个")
 
-    logger.info(f"Token 已就绪 (Cookie: {len(token_data.get('cookies', {}))}个)")
     STATE["status"] = "waiting"
 
     # 初始化时间同步
@@ -654,7 +1084,7 @@ def main():
         STATE["status"] = "waiting"
         return
 
-    # 定时调度：在目标时间 - 提前秒数 触发
+    # 定时调度：在所有账号最早的开始时间触发
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
         from apscheduler.triggers.cron import CronTrigger
@@ -662,20 +1092,8 @@ def main():
         global _scheduler
         _scheduler = BackgroundScheduler(timezone=BJT)
 
-        # 计算调度触发时间 = 目标时间 - 提前秒数
-        pre_sec = STATE.get("pre_start_sec", PRE_START_SEC)
-        trigger_hour = STATE.get("grab_hour", GRAB_HOUR)
-        trigger_minute = STATE.get("grab_minute", GRAB_MINUTE)
-        trigger_second = STATE.get("grab_second", GRAB_SECOND) - pre_sec
-        # 处理秒数变成负数的情况
-        if trigger_second < 0:
-            trigger_second += 60
-            trigger_minute -= 1
-            if trigger_minute < 0:
-                trigger_minute += 60
-                trigger_hour -= 1
-                if trigger_hour < 0:
-                    trigger_hour += 24
+        # 计算最早触发时间
+        trigger_hour, trigger_minute, trigger_second = calc_earliest_trigger()
 
         trigger = CronTrigger(
             hour=trigger_hour,
@@ -691,8 +1109,32 @@ def main():
             max_instances=1,
         )
 
-        grab_time = f"{STATE.get('grab_hour',0):02d}:{STATE.get('grab_minute',0):02d}:{STATE.get('grab_second',0):02d}"
-        logger.info(f"调度器已启动，等待 {grab_time} ...")
+        logger.info(f"调度器已启动，触发时间 {trigger_hour:02d}:{trigger_minute:02d}:{trigger_second:02d} ...")
+
+        # 每日自动签到 (8:00-20:00 之间随机时间)
+        import random
+        sign_in_hour = random.randint(8, 19)
+        sign_in_minute = random.randint(0, 59)
+        sign_in_trigger = CronTrigger(hour=sign_in_hour, minute=sign_in_minute, second=0, timezone=BJT)
+        _scheduler.add_job(
+            auto_sign_in_all,
+            trigger=sign_in_trigger,
+            id="pdd_auto_sign_in",
+            name="PDD每日自动签到",
+            max_instances=1,
+        )
+        logger.info(f"自动签到已启用: 每天 {sign_in_hour:02d}:{sign_in_minute:02d} 执行 (随机时段)")
+
+        # 每 2 小时自动查询签到状态
+        from apscheduler.triggers.interval import IntervalTrigger
+        _scheduler.add_job(
+            auto_query_all_sign_in,
+            trigger=IntervalTrigger(hours=2),
+            id="pdd_sign_in_query",
+            name="PDD签到状态查询",
+            max_instances=1,
+        )
+        logger.info("签到状态查询已启用: 每 2 小时自动查询")
 
         _scheduler.start()
         # 注册调度器到 dashboard，使配置保存时能更新时间
