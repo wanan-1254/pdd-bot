@@ -515,9 +515,10 @@ def perform_sign_in(account: dict) -> dict:
     session = _make_pdd_session(account)
 
     try:
+        # 1. 先查询获取 sub_task_id
         anti_token = generate_anti_content(int(time.time() * 1000))
         session.headers["anti-content"] = anti_token
-        resp = session.post(_PDD_SIGN_URL, json={
+        resp = session.post(_PDD_QUERY_URL, json={
             "task_id": _PDD_TASK_ID,
             "task_template_id": _PDD_TASK_TEMPLATE_ID,
             "source": "deposit",
@@ -526,8 +527,50 @@ def perform_sign_in(account: dict) -> dict:
         }, timeout=10)
 
         data = resp.json()
+        if not data.get("success"):
+            err = data.get("errorMsg", "查询失败")
+            code = data.get("errorCode", "")
+            return {"success": False, "message": f"签到前查询失败: {err} (code: {code})"}
+
+        result = data.get("result", {})
+        sub_tasks = result.get("sub_task_list", [])
+        if not sub_tasks:
+            return {"success": False, "message": "无可用子任务(可能已签到或活动未开启)"}
+
+        # 取第一个可点击签到的子任务
+        sub_task = sub_tasks[0]
+        btn = sub_task.get("check_in_button", {})
+        sub_task_id = sub_task.get("sub_task_id", "")
+
+        can_click = btn.get("can_click", False)
+        finish_count = result.get("finish_count", 0)
+
+        if not can_click:
+            display_status = result.get("display_status", 0)
+            if finish_count >= 5:
+                return {"success": False, "message": f"已满{finish_count}天，无需签到"}
+            return {"success": False, "message": f"今日不可签到 (display_status={display_status}, 已签到{finish_count}天)"}
+
+        if not sub_task_id:
+            # 兜底：尝试用 task_template_id 作为子任务 ID
+            sub_task_id = str(_PDD_TASK_TEMPLATE_ID)
+
+        # 2. 执行签到
+        anti_token = generate_anti_content(int(time.time() * 1000))
+        session.headers["anti-content"] = anti_token
+        resp = session.post(_PDD_SIGN_URL, json={
+            "task_id": _PDD_TASK_ID,
+            "task_template_id": _PDD_TASK_TEMPLATE_ID,
+            "sub_task_id": sub_task_id,
+            "source": "deposit",
+            "pdduid": user_id,
+            "request_source": 1,
+        }, timeout=10)
+
+        data = resp.json()
         if data.get("success"):
-            return {"success": True, "message": "签到成功"}
+            new_count = finish_count + 1
+            return {"success": True, "message": f"签到成功 ({new_count}/5天)"}
         else:
             err = data.get("errorMsg", "签到失败")
             code = data.get("errorCode", "")
