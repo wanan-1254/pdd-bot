@@ -436,34 +436,6 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
         <div class="config-row"><span class="config-key">PORT</span><span class="config-val">Web 面板端口</span></div>
       </div>
 
-      <!-- 安全设置 · 账号密码管理 -->
-      <div style="margin-top:16px;padding:16px;background:var(--card);border:1px solid var(--border);border-radius:12px">
-        <h3 style="margin-bottom:12px">🔒 安全设置</h3>
-        <div id="loginInfoBox" style="padding:10px 14px;background:var(--bg);border-radius:8px;border:1px solid var(--border);margin-bottom:12px;font-size:13px">
-          当前登录账号: <strong id="currentLoginUser">加载中...</strong>
-        </div>
-        <div class="form-group">
-          <label class="form-label">新用户名 <span style="color:var(--text3);font-weight:normal">(可选，不改则留空)</span></label>
-          <input class="form-input" id="newLoginUser" type="text" placeholder="新的登录用户名，如 admin2" style="max-width:300px">
-        </div>
-        <div class="form-group">
-          <label class="form-label">新密码</label>
-          <input class="form-input" id="pwdNew" type="password" placeholder="新密码（至少4位）" style="max-width:300px">
-        </div>
-        <div class="form-group">
-          <label class="form-label">确认新密码</label>
-          <input class="form-input" id="pwdConfirm" type="password" placeholder="再次输入新密码" style="max-width:300px">
-        </div>
-        <div class="form-group">
-          <label class="form-label">当前密码</label>
-          <input class="form-input" id="pwdOld" type="password" placeholder="输入当前密码以确认身份" style="max-width:300px">
-        </div>
-        <div class="btn-group">
-          <button class="btn btn-primary" onclick="changeLoginCredentials()">🔒 修改账号密码</button>
-          <button class="btn btn-danger" onclick="logout()" style="margin-left:10px">🚪 退出登录</button>
-        </div>
-        <div id="pwdResult" style="display:none;margin-top:12px"></div>
-      </div>
     </div>
 
     <!-- PAGE: 账号 -->
@@ -555,6 +527,34 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
         <div id="queryIntervalInfo" style="font-size:12px;color:var(--text2);padding:8px 12px;background:var(--bg);border-radius:6px">
           当前: 每 2 小时自动查询一次签到状态
         </div>
+      </div>
+      <!-- 安全设置 · 账号密码管理 -->
+      <div class="account-card" style="max-width:800px;margin-top:16px">
+        <h3>🔒 安全设置</h3>
+        <div id="loginInfoBox" style="padding:10px 14px;background:var(--bg);border-radius:8px;border:1px solid var(--border);margin-bottom:12px;font-size:13px">
+          当前登录账号: <strong id="currentLoginUser">加载中...</strong>
+        </div>
+        <div class="form-group">
+          <label class="form-label">新用户名 <span style="color:var(--text3);font-weight:normal">(可选，不改则留空)</span></label>
+          <input class="form-input" id="newLoginUser" type="text" placeholder="新的登录用户名，如 admin2" style="max-width:300px">
+        </div>
+        <div class="form-group">
+          <label class="form-label">新密码</label>
+          <input class="form-input" id="pwdNew" type="password" placeholder="新密码（至少4位）" style="max-width:300px">
+        </div>
+        <div class="form-group">
+          <label class="form-label">确认新密码</label>
+          <input class="form-input" id="pwdConfirm" type="password" placeholder="再次输入新密码" style="max-width:300px">
+        </div>
+        <div class="form-group">
+          <label class="form-label">当前密码</label>
+          <input class="form-input" id="pwdOld" type="password" placeholder="输入当前密码以确认身份" style="max-width:300px">
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" onclick="changeLoginCredentials()">🔒 修改账号密码</button>
+          <button class="btn btn-danger" onclick="logout()" style="margin-left:10px">🚪 退出登录</button>
+        </div>
+        <div id="pwdResult" style="display:none;margin-top:12px"></div>
       </div>
     </div>
   </div>
@@ -742,7 +742,7 @@ async function changeLoginCredentials() {
     if (d.success) {
       el.className = 'test-result ok';
       el.innerHTML = '✅ 登录凭证已更新！下次登录请使用新凭证。';
-      fetch('/api/login-username').then(r2 => r2.json()).then(d2 => {
+      fetch('/api/get-login-info').then(r2 => r2.json()).then(d2 => {
         document.getElementById('currentLoginUser').textContent = d2.username || '(未知)';
       });
       document.getElementById('pwdOld').value = '';
@@ -768,6 +768,7 @@ async function logout() {
 
 // === Account Functions (Multi-Account) ===
 let _accountsCache = [];
+let _accTestResults = {};  // 缓存测试结果，防止轮询覆盖
 
 function renderAccountList(accounts) {
   _accountsCache = accounts || [];
@@ -803,12 +804,21 @@ function renderAccountList(accounts) {
     }
     progressHtml += '</div>';
 
-    // 状态标签
-    let statusBadge;
-    if (ds === 40) statusBadge = '<span style="background:var(--orange-bg);color:var(--orange);padding:2px 8px;border-radius:4px;font-size:11px">已领取</span>';
-    else if (canGrab) statusBadge = '<span style="background:var(--green-bg);color:var(--green);padding:2px 8px;border-radius:4px;font-size:11px">可抢券</span>';
-    else if (canSign) statusBadge = '<span style="background:var(--blue-bg);color:var(--blue);padding:2px 8px;border-radius:4px;font-size:11px">可签到</span>';
-    else statusBadge = `<span style="background:var(--bg);color:var(--text2);padding:2px 8px;border-radius:4px;font-size:11px">${fc}/5天</span>`;
+    // 状态标签 + 抢券资格标签
+    let statusBadges = '';
+    if (ds === 40) {
+      statusBadges = '<span style="background:var(--orange-bg);color:var(--orange);padding:2px 8px;border-radius:4px;font-size:11px">已领取·等待重置</span>'
+        + '<span style="background:var(--red-bg);color:var(--red);padding:2px 8px;border-radius:4px;font-size:11px;margin-left:4px">🚫 不可抢</span>';
+    } else if (fc >= 5) {
+      // 签到满5天 = 可抢券 (ds=31未领券、gc<fc未领、都一样直接抢)
+      statusBadges = '<span style="background:var(--green-bg);color:var(--green);padding:3px 10px;border-radius:4px;font-size:12px;font-weight:700;border:1px solid var(--green)">✅ 可抢券</span>';
+    } else if (fc > 0) {
+      statusBadges = `<span style="background:var(--bg);color:var(--text2);padding:2px 8px;border-radius:4px;font-size:11px">签到中 ${fc}/5天</span>`
+        + '<span style="background:var(--red-bg);color:var(--red);padding:2px 8px;border-radius:4px;font-size:11px;margin-left:4px">🚫 不可抢</span>';
+    } else {
+      statusBadges = '<span style="background:var(--bg);color:var(--text2);padding:2px 8px;border-radius:4px;font-size:11px">未开始</span>'
+        + '<span style="background:var(--red-bg);color:var(--red);padding:2px 8px;border-radius:4px;font-size:11px;margin-left:4px">🚫 不可抢</span>';
+    }
 
     return `
       <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;${!a.enabled?'opacity:0.5;':''}">
@@ -820,8 +830,8 @@ function renderAccountList(accounts) {
             </div>
             <div style="font-size:11px;color:var(--text3);margin-top:4px;margin-left:40px;font-family:monospace">${tokenPre}</div>
           </div>
-          <div style="display:flex;align-items:center;gap:6px">
-            ${statusBadge}
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            ${statusBadges}
             <label style="display:flex;align-items:center;gap:3px;font-size:11px;cursor:pointer;color:var(--text2)">
               <input type="checkbox" ${a.enabled ? 'checked' : ''} onchange="toggleAccount('${a.id}', this.checked)"> 启用
             </label>
@@ -831,6 +841,7 @@ function renderAccountList(accounts) {
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;flex-wrap:wrap;gap:6px">
           <div style="font-size:11px;color:var(--text3)">🕐 ${cfgStr} | ${cfg.thread_count||5}线程</div>
           <div style="display:flex;gap:4px;flex-wrap:wrap">
+            <button class="btn btn-outline" style="padding:3px 8px;font-size:11px" onclick="testAccountCookie('${a.id}','${a.label||''}')" title="测试Cookie">🍪</button>
             <button class="btn btn-outline" style="padding:3px 8px;font-size:11px" onclick="queryAccountSignIn('${a.id}','${a.label||''}')" title="查询签到状态">🔍</button>
             <button class="btn btn-outline" style="padding:3px 8px;font-size:11px" onclick="doAccountSignIn('${a.id}','${a.label||''}')" title="手动签到">📝</button>
             <button class="btn btn-outline" style="padding:3px 8px;font-size:11px" onclick="editAccount('${a.id}')" title="编辑">✏️</button>
@@ -843,9 +854,17 @@ function renderAccountList(accounts) {
           </label>
           ${si.last_check ? `<span style="font-size:10px;color:var(--text3)">上次检查: ${si.last_check}</span>` : ''}
         </div>
+        <div id="accResult_${a.id}" style="display:none;margin-top:8px;padding:8px 12px;border-radius:6px;font-size:12px"></div>
       </div>
     `;
   }).join('') + '</div>';
+  // 恢复缓存的测试结果
+  setTimeout(() => {
+    for (const [id, res] of Object.entries(_accTestResults)) {
+      const el = document.getElementById('accResult_' + id);
+      if (el) { el.style.display = 'block'; el.innerHTML = res.html; el.style.background = res.bg; el.style.color = res.color; el.style.border = res.border; }
+    }
+  }, 10);
 }
 
 async function saveAccount() {
@@ -966,26 +985,40 @@ async function toggleAccount(id, enabled) {
 }
 
 async function testAccountCookie(id, label) {
-  const result = document.getElementById('testResult');
+  const result = document.getElementById('accResult_' + id);
+  if (!result) return;
   result.style.display = 'block';
-  result.className = 'test-result loading';
-  result.innerHTML = `🔄 正在测试“${label}”的 Cookie...`;
+  result.style.background = 'var(--blue-bg)';
+  result.style.color = 'var(--blue)';
+  result.style.border = '1px solid #93C5FD';
+  result.innerHTML = `🔄 正在测试"${label}"的 Cookie...`;
   try {
     const r = await fetch('/api/test-cookie', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({account_id: id})
     });
     const d = await r.json();
+    let html, bg, color, border;
     if (d.valid) {
-      result.className = 'test-result ok';
-      result.innerHTML = `✅ <strong>Cookie 有效!</strong><br>${d.nickname||''}`;
+      html = `✅ <strong>Cookie 有效!</strong> ${d.nickname||''}`;
+      bg = 'var(--green-bg)'; color = 'var(--green)'; border = '1px solid #A7F3D0';
     } else {
-      result.className = 'test-result fail';
-      result.innerHTML = `❌ <strong>Cookie 无效</strong><br>${d.error||''}`;
+      html = `❌ <strong>Cookie 无效</strong> ${d.error||''}`;
+      bg = 'var(--red-bg)'; color = 'var(--red)'; border = '1px solid #FCA5A5';
     }
+    result.style.background = bg; result.style.color = color; result.style.border = border; result.innerHTML = html;
+    // 缓存结果，5秒后自动消失
+    _accTestResults[id] = {html, bg, color, border};
+    setTimeout(() => {
+      delete _accTestResults[id];
+      const el = document.getElementById('accResult_' + id);
+      if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+    }, 5000);
   } catch(e) {
-    result.className = 'test-result fail';
+    result.style.background = 'var(--red-bg)'; result.style.color = 'var(--red)'; result.style.border = '1px solid #FCA5A5';
     result.innerHTML = '❌ 请求失败: ' + e.message;
+    _accTestResults[id] = {html: result.innerHTML, bg: 'var(--red-bg)', color: 'var(--red)', border: '1px solid #FCA5A5'};
+    setTimeout(() => { delete _accTestResults[id]; const el = document.getElementById('accResult_' + id); if (el) { el.style.display = 'none'; } }, 5000);
   }
 }
 

@@ -432,7 +432,7 @@ def load_token_data() -> dict:
 # ============================================================
 # PDD 签到 API 集成
 # ============================================================
-_PDD_TASK_ID = "MT829143858423691176"
+# task_id 是动态的(每个签到周期变化)，不传则服务端自动使用当前有效task_id
 _PDD_TASK_TEMPLATE_ID = "1"
 _PDD_QUERY_URL = "https://mobile.yangkeduo.com/proxy/api/api/aurum/check_in/task/query"
 _PDD_SIGN_URL = "https://mobile.yangkeduo.com/proxy/api/api/aurum/check_in/task/sub_task/finish"
@@ -472,7 +472,6 @@ def query_sign_in_status(account: dict) -> dict:
         resp = session.post(_PDD_QUERY_URL, json={
             "request_source": 1,
             "anti_content": anti_token,
-            "task_id": _PDD_TASK_ID,
             "task_template_id": _PDD_TASK_TEMPLATE_ID,
             "pdduid": user_id,
         }, timeout=10)
@@ -521,13 +520,12 @@ def perform_sign_in(account: dict) -> dict:
     session = _make_pdd_session(account)
 
     try:
-        # 1. 先查询获取 sub_task_id
+        # 1. 先查询签到状态
         anti_token = generate_anti_content(int(time.time() * 1000))
         session.headers["anti-content"] = anti_token
         query_body = {
             "request_source": 1,
             "anti_content": anti_token,
-            "task_id": _PDD_TASK_ID,
             "task_template_id": _PDD_TASK_TEMPLATE_ID,
             "pdduid": user_id,
         }
@@ -553,21 +551,10 @@ def perform_sign_in(account: dict) -> dict:
         # 取第一个可点击签到的子任务
         sub_task = sub_tasks[0]
         btn = sub_task.get("check_in_button", {})
-        sub_task_id = str(sub_task.get("sub_task_id", ""))
-        
-        # 也尝试其他可能的字段名
-        if not sub_task_id:
-            for key in ["subTaskId", "id", "task_id"]:
-                val = sub_task.get(key, "")
-                if val and str(val):
-                    sub_task_id = str(val)
-                    logger.info(f"[签到] [{label}] 使用字段 '{key}' 作为 sub_task_id: {sub_task_id}")
-                    break
-
         can_click = btn.get("can_click", False)
         finish_count = result.get("finish_count", 0)
 
-        logger.info(f"[签到] [{label}] can_click={can_click}, sub_task_id={sub_task_id}, finish_count={finish_count}")
+        logger.info(f"[签到] [{label}] can_click={can_click}, finish_count={finish_count}")
 
         if not can_click:
             display_status = result.get("display_status", 0)
@@ -575,17 +562,14 @@ def perform_sign_in(account: dict) -> dict:
                 return {"success": False, "message": f"已满{finish_count}天，无需签到"}
             return {"success": False, "message": f"今日不可签到 (display_status={display_status}, 已签到{finish_count}天)"}
 
-        # 2. 执行签到 — 参数格式与抢券请求一致
+        # 2. 执行签到 — 不传 task_id/sub_task_id，服务端自动识别当前任务
         anti_token = generate_anti_content(int(time.time() * 1000))
         session.headers["anti-content"] = anti_token
         
-        # 签到请求体：与抢券接口参数格式对齐
         sign_body = {
             "request_source": 1,
             "anti_content": anti_token,
-            "task_id": _PDD_TASK_ID,
             "task_template_id": _PDD_TASK_TEMPLATE_ID,
-            "sub_task_id": sub_task_id,
         }
         logger.info(f"[签到] [{label}] 签到请求: {sign_body}")
         resp = session.post(_PDD_SIGN_URL, json=sign_body, timeout=10)
@@ -602,27 +586,9 @@ def perform_sign_in(account: dict) -> dict:
             err = data.get("errorMsg", "签到失败")
             code = data.get("errorCode", "")
             
-            # 如果还是8070001错误，尝试不带 sub_task_id 的请求
+            # 如果还是失败，记录详细错误
             if code == "8070001":
-                logger.warning(f"[签到] [{label}] 8070001错误，尝试不带sub_task_id...")
-                anti_token2 = generate_anti_content(int(time.time() * 1000))
-                session.headers["anti-content"] = anti_token2
-                simple_body = {
-                    "request_source": 1,
-                    "anti_content": anti_token2,
-                    "task_id": _PDD_TASK_ID,
-                    "task_template_id": _PDD_TASK_TEMPLATE_ID,
-                }
-                resp2 = session.post(_PDD_SIGN_URL, json=simple_body, timeout=10)
-                data2 = resp2.json()
-                logger.info(f"[签到] [{label}] 简化请求响应: {str(data2)[:500]}")
-                
-                if data2.get("success"):
-                    new_count = finish_count + 1
-                    return {"success": True, "message": f"签到成功 ({new_count}/5天)"}
-                err2 = data2.get("errorMsg", err)
-                code2 = data2.get("errorCode", code)
-                return {"success": False, "message": f"{err2} (code: {code2})"}
+                logger.warning(f"[签到] [{label}] 8070001错误，请检查Cookie是否过期")
             
             return {"success": False, "message": f"{err} (code: {code})"}
     except Exception as e:
@@ -798,12 +764,10 @@ def run_grab_session():
         if ds == 40:
             logger.warning(f"[{label}] 已领取过优惠券，需重新签到5天才能抢券 (跳过)")
             continue
-        elif fc >= 5 and gc < fc:
-            logger.info(f"[{label}] 签到{fc}天 ✅ 可抢券")
-            eligible_accounts.append(acc)
         elif fc >= 5:
-            logger.warning(f"[{label}] 签到{fc}天但已领奖 (跳过)")
-            continue
+            # 签到满5天即可抢券 (不管ds=31还是gc<fc，都一样直接抢)
+            logger.info(f"[{label}] 签到{fc}天 ✅ 可抢券 (ds={ds}, gain={gc})")
+            eligible_accounts.append(acc)
         else:
             logger.warning(f"[{label}] 签到{fc}/5天，不满5天不可抢券 (跳过)")
             continue
@@ -830,8 +794,7 @@ def run_grab_session():
 
     STATE["status"] = "grabbing"
 
-    # 全局成功标志
-    grab_success = _threading.Event()
+    # 各账号独立抢券，互不影响
     account_results = {}  # {account_id: {success, detail, total_requests}}
     results_lock = _threading.Lock()
     skip_wait = os.getenv("SKIP_WAIT", "false").lower() == "true"
@@ -845,7 +808,6 @@ def run_grab_session():
         "Referer": "https://mobile.yangkeduo.com/charge_sign_coupon.html",
         "Origin": "https://mobile.yangkeduo.com",
     }
-    task_id = os.getenv("PDD_TASK_ID", "MT829143858423691176")
     task_template_id = os.getenv("PDD_TASK_TEMPLATE_ID", "1")
 
     def account_grab_worker(account):
@@ -854,6 +816,9 @@ def run_grab_session():
         acc_label = account.get("label", acc_id)
         cookies = account.get("cookies", {})
         cfg = account.get("config", {})
+
+        # 每个账号独立的成功标志
+        acc_success = _threading.Event()
 
         grab_h = cfg.get("grab_hour", 0)
         grab_m = cfg.get("grab_minute", 0)
@@ -888,11 +853,6 @@ def run_grab_session():
                 remaining = (start_time - now_bjt()).total_seconds()
                 if remaining <= 0:
                     break
-                if grab_success.is_set():
-                    logger.info(f"{tag} 其他账号已成功，停止等待")
-                    with results_lock:
-                        account_results[acc_id] = {"success": False, "detail": "被其他账号抢先", "total_requests": 0}
-                    return
                 if remaining > 1.0:
                     time.sleep(min(remaining - 0.5, 60))
                 elif remaining > 0.001:
@@ -913,7 +873,7 @@ def run_grab_session():
         def worker(tid):
             """工作子线程"""
             count = 0
-            while not stop_event.is_set() and not grab_success.is_set():
+            while not stop_event.is_set() and not acc_success.is_set():
                 t0 = time.time()
                 try:
                     anti_token = generate_anti_content(
@@ -923,7 +883,6 @@ def run_grab_session():
                     payload = {
                         "request_source": 1,
                         "anti_content": anti_token,
-                        "task_id": task_id,
                         "task_template_id": task_template_id,
                     }
                     resp = session.post(api_url, json=payload, headers=h, timeout=3)
@@ -936,7 +895,7 @@ def run_grab_session():
                     # 检查是否成功
                     if data.get("success") or data.get("error_code") == 0:
                         logger.info(f"{tag} *** 抢券成功! *** 线程-{tid} #{count}")
-                        grab_success.set()
+                        acc_success.set()
                         stop_event.set()
                         return
                     if count % 10 == 0:
@@ -955,7 +914,7 @@ def run_grab_session():
         # 等待结束时间或成功标志
         if not skip_wait:
             while True:
-                if grab_success.is_set() and stop_event.is_set():
+                if acc_success.is_set() and stop_event.is_set():
                     break
                 remaining = (end_time - now_bjt()).total_seconds()
                 if remaining <= 0:
@@ -975,7 +934,7 @@ def run_grab_session():
         session.close()
 
         # 分析结果
-        success = grab_success.is_set() and any(
+        success = acc_success.is_set() and any(
             r.get("data", {}).get("success") or r.get("data", {}).get("error_code") == 0
             for r in results
         )
