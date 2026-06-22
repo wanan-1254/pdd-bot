@@ -938,13 +938,15 @@ async function toggleAccount(id, enabled) {
 }
 
 async function testAccountCookie(id, label) {
+  const loadingHtml = `🔄 正在测试“${label}”的 Cookie...`;
+  const loadingBg = 'var(--blue-bg)'; const loadingColor = 'var(--blue)'; const loadingBorder = '1px solid #93C5FD';
+  _accTestResults[id] = {html: loadingHtml, bg: loadingBg, color: loadingColor, border: loadingBorder};
   const result = document.getElementById('accResult_' + id);
-  if (!result) return;
-  result.style.display = 'block';
-  result.style.background = 'var(--blue-bg)';
-  result.style.color = 'var(--blue)';
-  result.style.border = '1px solid #93C5FD';
-  result.innerHTML = `🔄 正在测试"${label}"的 Cookie...`;
+  if (result) {
+    result.style.display = 'block';
+    result.style.background = loadingBg; result.style.color = loadingColor; result.style.border = loadingBorder;
+    result.innerHTML = loadingHtml;
+  }
   try {
     const r = await fetch('/api/test-cookie', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -959,29 +961,34 @@ async function testAccountCookie(id, label) {
       html = `❌ <strong>Cookie 无效</strong> ${d.error||''}`;
       bg = 'var(--red-bg)'; color = 'var(--red)'; border = '1px solid #FCA5A5';
     }
-    result.style.background = bg; result.style.color = color; result.style.border = border; result.innerHTML = html;
-    // 缓存结果，5秒后自动消失
     _accTestResults[id] = {html, bg, color, border};
+    const el = document.getElementById('accResult_' + id);
+    if (el) { el.style.display = 'block'; el.style.background = bg; el.style.color = color; el.style.border = border; el.innerHTML = html; }
     setTimeout(() => {
       delete _accTestResults[id];
-      const el = document.getElementById('accResult_' + id);
-      if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+      const el2 = document.getElementById('accResult_' + id);
+      if (el2) { el2.style.display = 'none'; el2.innerHTML = ''; }
     }, 5000);
   } catch(e) {
-    result.style.background = 'var(--red-bg)'; result.style.color = 'var(--red)'; result.style.border = '1px solid #FCA5A5';
-    result.innerHTML = '❌ 请求失败: ' + e.message;
-    _accTestResults[id] = {html: result.innerHTML, bg: 'var(--red-bg)', color: 'var(--red)', border: '1px solid #FCA5A5'};
-    setTimeout(() => { delete _accTestResults[id]; const el = document.getElementById('accResult_' + id); if (el) { el.style.display = 'none'; } }, 5000);
+    const errHtml = '❌ 请求失败: ' + e.message;
+    _accTestResults[id] = {html: errHtml, bg: 'var(--red-bg)', color: 'var(--red)', border: '1px solid #FCA5A5'};
+    const el = document.getElementById('accResult_' + id);
+    if (el) { el.style.display = 'block'; el.style.background = 'var(--red-bg)'; el.style.color = 'var(--red)'; el.style.border = '1px solid #FCA5A5'; el.innerHTML = errHtml; }
+    setTimeout(() => { delete _accTestResults[id]; const el2 = document.getElementById('accResult_' + id); if (el2) { el2.style.display = 'none'; } }, 5000);
   }
 }
 
 async function testAccountGrab(id, label) {
   if (!confirm(`立即为“${label}”触发抢券测试？（跳过时间等待，直接发送请求）`)) return;
+  const loadingHtml = `🔄 正在为“${label}”测试抢券...`;
+  const loadingBg = 'var(--blue-bg)'; const loadingColor = 'var(--blue)'; const loadingBorder = '1px solid #93C5FD';
+  // 立即缓存加载状态，防止轮询重绘覆盖
+  _accTestResults[id] = {html: loadingHtml, bg: loadingBg, color: loadingColor, border: loadingBorder};
   const result = document.getElementById('accResult_' + id);
   if (result) {
     result.style.display = 'block';
-    result.style.background = 'var(--blue-bg)'; result.style.color = 'var(--blue)'; result.style.border = '1px solid #93C5FD';
-    result.innerHTML = `🔄 正在为“${label}”测试抢券...`;
+    result.style.background = loadingBg; result.style.color = loadingColor; result.style.border = loadingBorder;
+    result.innerHTML = loadingHtml;
   }
   try {
     const r = await fetch('/api/test-grab-account', {
@@ -989,26 +996,33 @@ async function testAccountGrab(id, label) {
       body: JSON.stringify({account_id: id})
     });
     const d = await r.json();
-    if (result) {
-      if (d.success) {
-        result.style.background = 'var(--green-bg)'; result.style.color = 'var(--green)'; result.style.border = '1px solid #A7F3D0';
-        result.innerHTML = `✅ <strong>抢券成功!</strong> ${d.detail||''}`;
-      } else {
-        result.style.background = 'var(--orange-bg)'; result.style.color = 'var(--orange)'; result.style.border = '1px solid #FCD34D';
-        result.innerHTML = `⚠️ <strong>${d.detail||'抢券结束'}</strong> (${d.total_requests||0}个请求)`;
-      }
-      _accTestResults[id] = {html: result.innerHTML, bg: result.style.background, color: result.style.color, border: result.style.border};
-      setTimeout(() => {
-        delete _accTestResults[id];
-        const el = document.getElementById('accResult_' + id);
-        if (el) { el.style.display = 'none'; el.innerHTML = ''; }
-      }, 8000);
+    let html, bg, color, border;
+    if (d.success) {
+      html = `✅ <strong>抢券成功!</strong> ${d.detail||''}`;
+      bg = 'var(--green-bg)'; color = 'var(--green)'; border = '1px solid #A7F3D0';
+    } else {
+      html = `⚠️ <strong>${d.detail||'抢券结束'}</strong> (${d.total_requests||0}个请求)`;
+      bg = 'var(--orange-bg)'; color = 'var(--orange)'; border = '1px solid #FCD34D';
     }
+    // 更新缓存和当前div
+    _accTestResults[id] = {html, bg, color, border};
+    const el = document.getElementById('accResult_' + id);
+    if (el) {
+      el.style.display = 'block'; el.style.background = bg; el.style.color = color; el.style.border = border; el.innerHTML = html;
+    }
+    setTimeout(() => {
+      delete _accTestResults[id];
+      const el2 = document.getElementById('accResult_' + id);
+      if (el2) { el2.style.display = 'none'; el2.innerHTML = ''; }
+    }, 8000);
   } catch(e) {
-    if (result) {
-      result.style.background = 'var(--red-bg)'; result.style.color = 'var(--red)'; result.style.border = '1px solid #FCA5A5';
-      result.innerHTML = '❌ 请求失败: ' + e.message;
+    const errHtml = '❌ 请求失败: ' + e.message;
+    _accTestResults[id] = {html: errHtml, bg: 'var(--red-bg)', color: 'var(--red)', border: '1px solid #FCA5A5'};
+    const el = document.getElementById('accResult_' + id);
+    if (el) {
+      el.style.display = 'block'; el.style.background = 'var(--red-bg)'; el.style.color = 'var(--red)'; el.style.border = '1px solid #FCA5A5'; el.innerHTML = errHtml;
     }
+    setTimeout(() => { delete _accTestResults[id]; const el2 = document.getElementById('accResult_' + id); if (el2) { el2.style.display = 'none'; } }, 8000);
   }
 }
 
@@ -1441,8 +1455,10 @@ def api_test_grab():
 def api_test_grab_account():
     """为单个账号立即触发抢券测试 (跳过时间等待，同步执行)"""
     import time as _t
+    import requests as _req
     try:
-        from main import load_accounts, _make_pdd_session, generate_anti_content, get_time_offset, now_bjt
+        from main import load_accounts, get_time_offset
+        from pdd_token import generate_anti_content
         data = request.get_json()
         account_id = data.get("account_id", "")
         accounts = load_accounts()
@@ -1464,9 +1480,9 @@ def api_test_grab_account():
         }
         task_template_id = "1"
 
-        add_log("info", "抢券", f"[{label}] 单账号测试抢券开始 ({t_count}线程，持续5秒)")
+        add_log("info", "抢券", f"[{label}] 单账号测试抢券开始 ({t_count}线程，持续3秒)")
 
-        session = __import__("requests").Session()
+        session = _req.Session()
         session.headers.update(base_headers)
         session.cookies.update(cookies)
 
@@ -1510,7 +1526,7 @@ def api_test_grab_account():
             threads.append(t)
             t.start()
 
-        _t.sleep(5)  # 发送 5 秒
+        _t.sleep(3)  # 发送 3 秒
         stop_event.set()
         for t in threads:
             t.join(timeout=3)
