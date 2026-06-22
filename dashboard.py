@@ -29,6 +29,10 @@ def register_scheduler(scheduler):
     print(f"[Dashboard] 调度器已注册: {scheduler}")
 
 
+# 日志配置
+import os as _os
+_log_max = int(_os.getenv("LOG_MAX_COUNT", "0"))  # 0=不限制
+
 # 共享状态 (main.py 会更新这个)
 STATE = {
     "status": "idle",           # idle / waiting / grabbing / success / failed
@@ -51,13 +55,14 @@ STATE = {
     "ntp_offset_ms": 0,
     "uptime_start": time.time(),
     "query_interval_minutes": 120,
+    "log_max_count": _log_max,  # 0=不限制
 }
 
-# 日志队列 (最多保留 200 条)
-LOGS = deque(maxlen=200)
+# 日志队列 (可通过面板配置，默认不限制)
+LOGS = deque(maxlen=_log_max if _log_max > 0 else None)
 
 # 抢券历史
-HISTORY = deque(maxlen=50)
+HISTORY = deque(maxlen=200)
 
 
 def add_log(level: str, module: str, message: str):
@@ -393,49 +398,12 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
 
     <!-- PAGE: 配置 -->
     <div class="page" id="page-config">
-      <div class="page-title">⚙️ 配置详情</div>
-      <div class="config-table">
-        <div class="form-row" style="margin-bottom:14px">
-          <span class="form-label">目标时间</span>
-          <input class="form-input form-input-sm" id="editHour" type="number" min="0" max="23" placeholder="时">
-          <span>:</span>
-          <input class="form-input form-input-sm" id="editMin" type="number" min="0" max="59" placeholder="分">
-          <span>:</span>
-          <input class="form-input form-input-sm" id="editSec" type="number" min="0" max="59" placeholder="秒">
-        </div>
-        <div class="form-row" style="margin-bottom:14px">
-          <span class="form-label">提前开火</span>
-          <input class="form-input form-input-sm" id="editPreSec" type="number" min="1" max="120" placeholder="秒"> <span>秒前开始</span>
-        </div>
-        <div class="form-row" style="margin-bottom:14px">
-          <span class="form-label">结束时间</span>
-          <input class="form-input form-input-sm" id="editEndHour" type="number" min="0" max="23" placeholder="时">
-          <span>:</span>
-          <input class="form-input form-input-sm" id="editEndMin" type="number" min="0" max="59" placeholder="分">
-          <span>:</span>
-          <input class="form-input form-input-sm" id="editEndSec" type="number" min="0" max="59" placeholder="秒">
-        </div>
-        <div class="form-row" style="margin-bottom:14px">
-          <span class="form-label">并发线程</span>
-          <input class="form-input form-input-sm" id="editThreads" type="number" min="1" max="20" placeholder="个"> <span>个线程持续发送</span>
-        </div>
-        <div class="btn-group">
-          <button class="btn btn-primary" onclick="saveConfig()">💾 保存配置</button>
-          <button class="btn btn-success" onclick="testGrab()">🚀 立即测试抢券</button>
-          <button class="btn btn-outline" onclick="resetConfig()">↩ 恢复默认</button>
-        </div>
+      <div class="page-title">⚙️ 工具</div>
+      <div class="config-table" style="text-align:center;padding:30px">
+        <p style="color:var(--text2);margin-bottom:16px">每个账号的抢券配置请在「账号」页面单独设置</p>
+        <button class="btn btn-success" onclick="testGrab()" style="padding:14px 40px;font-size:16px">🚀 立即测试抢券</button>
+        <p style="color:var(--text3);font-size:12px;margin-top:12px">跳过时间等待，直接发送抢券请求，用于测试账号是否可用</p>
       </div>
-      <div style="margin-top:16px;padding:16px;background:var(--card);border:1px solid var(--border);border-radius:12px">
-        <h3 style="margin-bottom:12px">💡 环境变量说明</h3>
-        <div class="config-row"><span class="config-key">GRAB_HOUR</span><span class="config-val">目标时间 - 小时 (0-23)</span></div>
-        <div class="config-row"><span class="config-key">GRAB_MINUTE</span><span class="config-val">目标时间 - 分钟 (0-59)</span></div>
-        <div class="config-row"><span class="config-key">GRAB_SECOND</span><span class="config-val">目标时间 - 秒 (0-59)</span></div>
-        <div class="config-row"><span class="config-key">PRE_START_SEC</span><span class="config-val">提前开始秒数 (如10=提前10秒开火)</span></div>
-        <div class="config-row"><span class="config-key">END_HOUR/MINUTE/SECOND</span><span class="config-val">结束时间 (窗口内持续发送)</span></div>
-        <div class="config-row"><span class="config-key">THREAD_COUNT</span><span class="config-val">并发线程数 (持续发送)</span></div>
-        <div class="config-row"><span class="config-key">PORT</span><span class="config-val">Web 面板端口</span></div>
-      </div>
-
     </div>
 
     <!-- PAGE: 账号 -->
@@ -526,6 +494,24 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
         </div>
         <div id="queryIntervalInfo" style="font-size:12px;color:var(--text2);padding:8px 12px;background:var(--bg);border-radius:6px">
           当前: 每 2 小时自动查询一次签到状态
+        </div>
+        <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:16px">
+          <h3 style="font-size:14px">📝 日志保存设置</h3>
+          <p style="font-size:12px;color:var(--text3);margin-bottom:12px">运行日志不会拖慢抢券速度，仅占用少量内存</p>
+          <div class="form-row" style="margin-bottom:12px">
+            <span class="form-label" style="min-width:100px">日志条数</span>
+            <select class="form-input" id="logMaxCount" style="max-width:150px" onchange="saveLogMaxCount()">
+              <option value="0">不限制（一直保存）</option>
+              <option value="1000">1000 条</option>
+              <option value="2000">2000 条</option>
+              <option value="5000">5000 条</option>
+              <option value="10000">10000 条</option>
+              <option value="50000">50000 条</option>
+            </select>
+          </div>
+          <div id="logMaxInfo" style="font-size:12px;color:var(--text2);padding:8px 12px;background:var(--bg);border-radius:6px">
+            当前: 不限制，日志会一直保存
+          </div>
         </div>
       </div>
       <!-- 安全设置 · 账号密码管理 -->
@@ -649,17 +635,14 @@ function updateDashboard(data) {
     const infoEl = document.getElementById('queryIntervalInfo');
     if (infoEl) infoEl.textContent = '当前: 每 ' + (labels[qiEl.value]||qiEl.value+'分钟') + ' 自动查询一次签到状态';
   }
-  // Fill global config form
-  const eh = document.getElementById('editHour');
-  if (eh && !eh.dataset.filled) {
-    eh.value = data.grab_hour; eh.dataset.filled = '1';
-    document.getElementById('editMin').value = data.grab_minute;
-    document.getElementById('editSec').value = data.grab_second;
-    document.getElementById('editPreSec').value = data.pre_start_sec || 10;
-    document.getElementById('editEndHour').value = data.end_hour || 0;
-    document.getElementById('editEndMin').value = data.end_minute || 0;
-    document.getElementById('editEndSec').value = data.end_second || 30;
-    document.getElementById('editThreads').value = data.thread_count || 5;
+  // 回显日志保存条数
+  const lmEl = document.getElementById('logMaxCount');
+  if (lmEl && !lmEl.dataset.filled) {
+    lmEl.value = String(data.log_max_count || 0);
+    lmEl.dataset.filled = '1';
+    const logLabels = {0:'不限制，日志会一直保存',1000:'1000条',2000:'2000条',5000:'5000条',10000:'10000条',50000:'50000条'};
+    const logInfoEl = document.getElementById('logMaxInfo');
+    if (logInfoEl) logInfoEl.textContent = '当前: ' + (logLabels[lmEl.value]||lmEl.value+'条');
   }
 }
 
@@ -670,37 +653,6 @@ function showToast(msg, type='info') {
   t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 3000);
-}
-
-// === Config Functions ===
-async function saveConfig() {
-  const cfg = {
-    grab_hour: parseInt(document.getElementById('editHour').value) || 0,
-    grab_minute: parseInt(document.getElementById('editMin').value) || 0,
-    grab_second: parseInt(document.getElementById('editSec').value) || 0,
-    pre_start_sec: parseInt(document.getElementById('editPreSec').value) || 10,
-    end_hour: parseInt(document.getElementById('editEndHour').value) || 0,
-    end_minute: parseInt(document.getElementById('editEndMin').value) || 0,
-    end_second: parseInt(document.getElementById('editEndSec').value) || 30,
-    thread_count: parseInt(document.getElementById('editThreads').value) || 5,
-  };
-  try {
-    const r = await fetch('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(cfg) });
-    const d = await r.json();
-    if (d.success) showToast('配置已保存!', 'success');
-    else showToast('保存失败: ' + (d.error||''), 'error');
-  } catch(e) { showToast('请求失败: '+e.message, 'error'); }
-}
-function resetConfig() {
-  document.getElementById('editHour').value = 0;
-  document.getElementById('editMin').value = 0;
-  document.getElementById('editSec').value = 0;
-  document.getElementById('editPreSec').value = 10;
-  document.getElementById('editEndHour').value = 0;
-  document.getElementById('editEndMin').value = 0;
-  document.getElementById('editEndSec').value = 30;
-  document.getElementById('editThreads').value = 5;
-  showToast('已恢复默认值，点击保存生效', 'info');
 }
 
 async function testGrab() {
@@ -842,6 +794,7 @@ function renderAccountList(accounts) {
           <div style="font-size:11px;color:var(--text3)">🕐 ${cfgStr} | ${cfg.thread_count||5}线程</div>
           <div style="display:flex;gap:4px;flex-wrap:wrap">
             <button class="btn btn-outline" style="padding:3px 8px;font-size:11px" onclick="testAccountCookie('${a.id}','${a.label||''}')" title="测试Cookie">🍪</button>
+            <button class="btn btn-outline" style="padding:3px 8px;font-size:11px" onclick="testAccountGrab('${a.id}','${a.label||''}')" title="测试抢券">🎯</button>
             <button class="btn btn-outline" style="padding:3px 8px;font-size:11px" onclick="queryAccountSignIn('${a.id}','${a.label||''}')" title="查询签到状态">🔍</button>
             <button class="btn btn-outline" style="padding:3px 8px;font-size:11px" onclick="doAccountSignIn('${a.id}','${a.label||''}')" title="手动签到">📝</button>
             <button class="btn btn-outline" style="padding:3px 8px;font-size:11px" onclick="editAccount('${a.id}')" title="编辑">✏️</button>
@@ -1022,6 +975,43 @@ async function testAccountCookie(id, label) {
   }
 }
 
+async function testAccountGrab(id, label) {
+  if (!confirm(`立即为“${label}”触发抢券测试？（跳过时间等待，直接发送请求）`)) return;
+  const result = document.getElementById('accResult_' + id);
+  if (result) {
+    result.style.display = 'block';
+    result.style.background = 'var(--blue-bg)'; result.style.color = 'var(--blue)'; result.style.border = '1px solid #93C5FD';
+    result.innerHTML = `🔄 正在为“${label}”测试抢券...`;
+  }
+  try {
+    const r = await fetch('/api/test-grab-account', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({account_id: id})
+    });
+    const d = await r.json();
+    if (result) {
+      if (d.success) {
+        result.style.background = 'var(--green-bg)'; result.style.color = 'var(--green)'; result.style.border = '1px solid #A7F3D0';
+        result.innerHTML = `✅ <strong>抢券成功!</strong> ${d.detail||''}`;
+      } else {
+        result.style.background = 'var(--orange-bg)'; result.style.color = 'var(--orange)'; result.style.border = '1px solid #FCD34D';
+        result.innerHTML = `⚠️ <strong>${d.detail||'抢券结束'}</strong> (${d.total_requests||0}个请求)`;
+      }
+      _accTestResults[id] = {html: result.innerHTML, bg: result.style.background, color: result.style.color, border: result.style.border};
+      setTimeout(() => {
+        delete _accTestResults[id];
+        const el = document.getElementById('accResult_' + id);
+        if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+      }, 8000);
+    }
+  } catch(e) {
+    if (result) {
+      result.style.background = 'var(--red-bg)'; result.style.color = 'var(--red)'; result.style.border = '1px solid #FCA5A5';
+      result.innerHTML = '❌ 请求失败: ' + e.message;
+    }
+  }
+}
+
 async function queryAccountSignIn(id, label) {
   try {
     showToast(`正在查询“${label}”的签到状态...`, 'info');
@@ -1101,6 +1091,24 @@ async function saveQueryInterval() {
       const labels = {30:'30分钟',60:'1小时',120:'2小时',180:'3小时',360:'6小时',720:'12小时'};
       document.getElementById('queryIntervalInfo').textContent = '当前: 每 ' + (labels[val]||val+'分钟') + ' 自动查询一次签到状态';
       showToast('查询间隔已更新', 'success');
+    } else {
+      showToast('更新失败: '+(d.error||''), 'error');
+    }
+  } catch(e) { showToast('请求失败: '+e.message, 'error'); }
+}
+
+async function saveLogMaxCount() {
+  const val = document.getElementById('logMaxCount').value;
+  try {
+    const r = await fetch('/api/log-max', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({max_count: parseInt(val)})
+    });
+    const d = await r.json();
+    if (d.success) {
+      const labels = {0:'不限制，日志会一直保存',1000:'1000条',2000:'2000条',5000:'5000条',10000:'10000条',50000:'50000条'};
+      document.getElementById('logMaxInfo').textContent = '当前: ' + (labels[val]||val+'条');
+      showToast('日志保存设置已更新', 'success');
     } else {
       showToast('更新失败: '+(d.error||''), 'error');
     }
@@ -1404,12 +1412,132 @@ def api_test_grab():
             add_history(False, f"异常: {e}")
         finally:
             os.environ.pop("SKIP_WAIT", None)
+            # 确保状态不会卡在"抢券中"
+            if STATE["status"] == "grabbing":
+                STATE["status"] = "waiting"
+                add_log("info", "系统", "抢券状态已重置为等待")
 
     _grab_thread = threading.Thread(target=_run, daemon=True)
     _grab_thread.start()
 
+    # 启动超时保护: 60秒后如果还在抢券，强制重置状态
+    def _watchdog():
+        import time as _t
+        _t.sleep(60)
+        if STATE["status"] == "grabbing":
+            STATE["status"] = "waiting"
+            add_log("warn", "系统", "抢券超时(60秒)，状态已重置")
+    threading.Thread(target=_watchdog, daemon=True).start()
+
     add_log("info", "抢券", "手动测试抢券已触发 (跳过等待)")
     return jsonify({"success": True, "message": "抢券已触发，请查看日志"})
+
+
+# ============================================================
+# API: 单账号测试抢券
+# ============================================================
+@app.route("/api/test-grab-account", methods=["POST"])
+@login_required
+def api_test_grab_account():
+    """为单个账号立即触发抢券测试 (跳过时间等待，同步执行)"""
+    import time as _t
+    try:
+        from main import load_accounts, _make_pdd_session, generate_anti_content, get_time_offset, now_bjt
+        data = request.get_json()
+        account_id = data.get("account_id", "")
+        accounts = load_accounts()
+        account = next((a for a in accounts if a["id"] == account_id), None)
+        if not account:
+            return jsonify({"success": False, "detail": "账号不存在"})
+
+        label = account.get("label", account_id)
+        cookies = account.get("cookies", {})
+        cfg = account.get("config", {})
+        t_count = cfg.get("thread_count", 5)
+
+        api_url = "https://mobile.yangkeduo.com/proxy/api/api/aurum/check_in/task/gain/award"
+        base_headers = {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
+            "Content-Type": "application/json;charset=UTF-8",
+            "Referer": "https://mobile.yangkeduo.com/charge_sign_coupon.html",
+            "Origin": "https://mobile.yangkeduo.com",
+        }
+        task_template_id = "1"
+
+        add_log("info", "抢券", f"[{label}] 单账号测试抢券开始 ({t_count}线程，持续5秒)")
+
+        session = __import__("requests").Session()
+        session.headers.update(base_headers)
+        session.cookies.update(cookies)
+
+        stop_event = threading.Event()
+        results = []
+        r_lock = threading.Lock()
+        total_req = [0]
+        success_flag = [False]
+
+        def worker(tid):
+            count = 0
+            while not stop_event.is_set():
+                try:
+                    anti_token = generate_anti_content(
+                        int(_t.time() * 1000 + get_time_offset() * 1000)
+                    )
+                    h = {"anti-content": anti_token}
+                    payload = {
+                        "request_source": 1,
+                        "anti_content": anti_token,
+                        "task_template_id": task_template_id,
+                    }
+                    resp = session.post(api_url, json=payload, headers=h, timeout=3)
+                    data = resp.json()
+                    count += 1
+                    with r_lock:
+                        results.append(data)
+                        total_req[0] += 1
+                    if data.get("success") or data.get("error_code") == 0:
+                        add_log("success", "抢券", f"[{label}] 线程-{tid} #{count} 抢券成功!")
+                        success_flag[0] = True
+                        stop_event.set()
+                        return
+                except Exception:
+                    with r_lock:
+                        total_req[0] += 1
+
+        threads = []
+        for i in range(t_count):
+            t = threading.Thread(target=worker, args=(i,), daemon=True)
+            threads.append(t)
+            t.start()
+
+        _t.sleep(5)  # 发送 5 秒
+        stop_event.set()
+        for t in threads:
+            t.join(timeout=3)
+        session.close()
+
+        # 分析结果
+        detail = ""
+        if success_flag[0]:
+            detail = f"{label} 抢券成功!"
+            add_log("success", "抢券", f"[{label}] 测试抢券成功! ({total_req[0]}个请求)")
+        elif results:
+            for r in results:
+                err = str(r.get("error_msg", "")) + str(r.get("errorMsg", ""))
+                if any(kw in err for kw in ["已领完", "已抢完", "库存不足", "今日已领"]):
+                    detail = err[:80]
+                    break
+            if not detail:
+                detail = f"未抢到 ({total_req[0]}个请求)"
+            add_log("warn", "抢券", f"[{label}] 测试抢券结束: {detail}")
+        else:
+            detail = "无有效响应"
+            add_log("warn", "抢券", f"[{label}] 测试抢券无响应")
+
+        return jsonify({"success": success_flag[0], "detail": detail, "total_requests": total_req[0]})
+    except Exception as e:
+        add_log("error", "抢券", f"单账号测试抢券异常: {e}")
+        return jsonify({"success": False, "detail": str(e), "total_requests": 0})
 
 
 # ============================================================
@@ -1510,6 +1638,29 @@ def api_query_interval():
                 add_log("info", "配置", f"签到查询间隔已更新: {minutes} 分钟")
             except Exception as e:
                 add_log("warn", "系统", f"更新查询间隔失败: {e}")
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+# ============================================================
+# API: 日志保存条数设置
+# ============================================================
+@app.route("/api/log-max", methods=["POST"])
+@login_required
+def api_log_max():
+    """更新日志保存条数限制"""
+    try:
+        global LOGS
+        data = request.get_json()
+        max_count = data.get("max_count", 0)
+        # 重建 deque，保留现有日志
+        old_logs = list(LOGS)
+        new_maxlen = max_count if max_count > 0 else None
+        LOGS = deque(old_logs, maxlen=new_maxlen)
+        STATE["log_max_count"] = max_count
+        label = "不限制" if max_count == 0 else f"{max_count} 条"
+        add_log("info", "配置", f"日志保存上限已更新: {label}")
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})

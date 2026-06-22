@@ -469,7 +469,9 @@ def query_sign_in_status(account: dict) -> dict:
     try:
         anti_token = generate_anti_content(int(time.time() * 1000))
         session.headers["anti-content"] = anti_token
-        resp = session.post(_PDD_QUERY_URL, json={
+        # pdduid 放在 URL 参数中（与PDD真实页面一致）
+        query_url = f"{_PDD_QUERY_URL}?pdduid={user_id}" if user_id else _PDD_QUERY_URL
+        resp = session.post(query_url, json={
             "request_source": 1,
             "anti_content": anti_token,
             "task_template_id": _PDD_TASK_TEMPLATE_ID,
@@ -502,6 +504,7 @@ def query_sign_in_status(account: dict) -> dict:
             "display_status": display_status,
             "can_sign": can_sign,
             "can_grab": can_grab,
+            "task_id": result.get("task_id", ""),
             "task_name": result.get("task_name", ""),
             "raw_result": result,
         }
@@ -520,9 +523,10 @@ def perform_sign_in(account: dict) -> dict:
     session = _make_pdd_session(account)
 
     try:
-        # 1. 先查询签到状态
+        # 1. 先查询签到状态（获取动态 task_id）
         anti_token = generate_anti_content(int(time.time() * 1000))
         session.headers["anti-content"] = anti_token
+        query_url = f"{_PDD_QUERY_URL}?pdduid={user_id}" if user_id else _PDD_QUERY_URL
         query_body = {
             "request_source": 1,
             "anti_content": anti_token,
@@ -530,7 +534,7 @@ def perform_sign_in(account: dict) -> dict:
             "pdduid": user_id,
         }
         logger.info(f"[签到] [{label}] 查询请求: {query_body}")
-        resp = session.post(_PDD_QUERY_URL, json=query_body, timeout=10)
+        resp = session.post(query_url, json=query_body, timeout=10)
         logger.info(f"[签到] [{label}] 查询响应 status={resp.status_code}")
 
         data = resp.json()
@@ -562,7 +566,8 @@ def perform_sign_in(account: dict) -> dict:
                 return {"success": False, "message": f"已满{finish_count}天，无需签到"}
             return {"success": False, "message": f"今日不可签到 (display_status={display_status}, 已签到{finish_count}天)"}
 
-        # 2. 执行签到 — 不传 task_id/sub_task_id，服务端自动识别当前任务
+        # 2. 执行签到 — 使用查询返回的动态 task_id
+        task_id = result.get("task_id", "")
         anti_token = generate_anti_content(int(time.time() * 1000))
         session.headers["anti-content"] = anti_token
         
@@ -571,8 +576,12 @@ def perform_sign_in(account: dict) -> dict:
             "anti_content": anti_token,
             "task_template_id": _PDD_TASK_TEMPLATE_ID,
         }
+        if task_id:
+            sign_body["task_id"] = task_id
         logger.info(f"[签到] [{label}] 签到请求: {sign_body}")
-        resp = session.post(_PDD_SIGN_URL, json=sign_body, timeout=10)
+        # pdduid 放在 URL 参数中（与PDD真实页面一致）
+        sign_url = f"{_PDD_SIGN_URL}?pdduid={user_id}" if user_id else _PDD_SIGN_URL
+        resp = session.post(sign_url, json=sign_body, timeout=10)
         logger.info(f"[签到] [{label}] 签到响应 status={resp.status_code}")
 
         data = resp.json()
@@ -619,10 +628,16 @@ def refresh_account_sign_in(account_id: str) -> dict:
 
 
 def auto_sign_in_all():
-    """为所有启用且开启自动签到的账号执行签到"""
+    """为所有启用且开启自动签到的账号执行签到 (每个账号之间随机延迟防风控)"""
+    import random as _rand
     accounts = get_enabled_accounts()
     results = []
-    for acc in accounts:
+    for i, acc in enumerate(accounts):
+        # 每个账号之间随机延迟 30~180 秒，模拟人工操作
+        if i > 0:
+            delay = _rand.randint(30, 180)
+            logger.info(f"[签到] 防风控延迟 {delay}秒 后处理下一个账号...")
+            time.sleep(delay)
         sign_in = acc.get("sign_in", {})
         if not sign_in.get("auto_sign_in", True):
             continue
@@ -1164,10 +1179,9 @@ def main():
 
         logger.info(f"调度器已启动，触发时间 {trigger_hour:02d}:{trigger_minute:02d}:{trigger_second:02d} ...")
 
-        # 每日自动签到 (8:00-20:00 之间随机时间)
-        import random
-        sign_in_hour = random.randint(8, 19)
-        sign_in_minute = random.randint(0, 59)
+        # 每日自动签到 (固定基线时间 + 每账号随机延迟防风控)
+        sign_in_hour = int(os.getenv("SIGN_IN_HOUR", "6"))
+        sign_in_minute = int(os.getenv("SIGN_IN_MINUTE", "0"))
         sign_in_trigger = CronTrigger(hour=sign_in_hour, minute=sign_in_minute, second=0, timezone=BJT)
         _scheduler.add_job(
             auto_sign_in_all,
@@ -1176,7 +1190,7 @@ def main():
             name="PDD每日自动签到",
             max_instances=1,
         )
-        logger.info(f"自动签到已启用: 每天 {sign_in_hour:02d}:{sign_in_minute:02d} 执行 (随机时段)")
+        logger.info(f"自动签到已启用: 每天 {sign_in_hour:02d}:{sign_in_minute:02d} 开始 (每账号随机延迟30~180秒)")
 
         # 每 2 小时自动查询签到状态
         from apscheduler.triggers.interval import IntervalTrigger
