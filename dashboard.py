@@ -189,6 +189,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC'
 .log-level-error { color: var(--red); font-weight: 600; }
 .log-level-success { color: var(--green); font-weight: 600; }
 
+/* 抢券请求高亮 */
+.log-grab-request {
+  background: linear-gradient(90deg, rgba(59,130,246,0.05) 0%, transparent 100%);
+  border-left: 3px solid var(--blue);
+  padding-left: 8px;
+}
+.log-grab-success { color: var(--green); font-weight: 600; }
+.log-grab-fail { color: var(--red); font-weight: 600; }
+
 /* History */
 .history-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px;
                 border-bottom: 1px solid var(--bg); }
@@ -318,7 +327,7 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
           <div class="progress-bar"><div class="progress-fill" id="rateBar" style="width:0%;background:var(--green)"></div></div>
         </div>
       </div>
-      <!-- Countdown + Config -->
+      <!-- Countdown + Account Timers -->
       <div class="big-cards">
         <div class="big-card">
           <h3>⏰ 下次抢券倒计时</h3>
@@ -331,12 +340,10 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
           </div>
         </div>
         <div class="big-card">
-          <h3>⚙️ 当前配置</h3>
-          <div class="config-row"><span class="config-key">目标时间</span><span class="config-val" id="cfgTime">-</span></div>
-          <div class="config-row"><span class="config-key">提前开火</span><span class="config-val" id="cfgPre">-</span></div>
-          <div class="config-row"><span class="config-key">结束时间</span><span class="config-val" id="cfgEnd">-</span></div>
-          <div class="config-row"><span class="config-key">并发线程</span><span class="config-val" id="cfgThreads">-</span></div>
-          <div class="config-row"><span class="config-key">运行时长</span><span class="config-val" id="cfgUptime">-</span></div>
+          <h3>👥 账号抢券倒计时</h3>
+          <div id="accountTimers" style="max-height:200px;overflow-y:auto">
+            <div style="text-align:center;color:var(--text3);padding:20px;font-size:12px">加载中...</div>
+          </div>
         </div>
       </div>
       <!-- Logs + History -->
@@ -347,6 +354,9 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
             <div style="display:flex;gap:6px;align-items:center">
               <label style="font-size:12px;color:var(--text2);cursor:pointer;display:flex;align-items:center;gap:4px">
                 <input type="checkbox" id="autoFollowLogs" checked> 跟随最新
+              </label>
+              <label style="font-size:12px;color:var(--text2);cursor:pointer;display:flex;align-items:center;gap:4px;border-left:1px solid var(--border);padding-left:8px">
+                <input type="checkbox" id="showDetailedLogs"> 显示详细请求
               </label>
               <button class="btn btn-outline" style="padding:4px 12px;font-size:12px" onclick="clearLogs()">🗑 清除</button>
             </div>
@@ -374,6 +384,9 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
         <div style="display:flex;gap:8px;align-items:center">
           <label style="font-size:13px;color:var(--text2);cursor:pointer;display:flex;align-items:center;gap:4px">
             <input type="checkbox" id="autoFollowLogsFull" checked> 跟随最新
+          </label>
+          <label style="font-size:13px;color:var(--text2);cursor:pointer;display:flex;align-items:center;gap:4px;border-left:1px solid var(--border);padding-left:8px">
+            <input type="checkbox" id="showDetailedLogsFull"> 显示详细请求
           </label>
           <button class="btn btn-outline" style="padding:6px 16px;font-size:13px" onclick="clearLogs()">🗑 清除日志</button>
         </div>
@@ -604,15 +617,6 @@ function updateDashboard(data) {
   document.getElementById('successRate').textContent = rate;
   document.getElementById('grabCount').textContent = `成功 ${succ} / 总计 ${total} 次`;
   document.getElementById('rateBar').style.width = (total > 0 ? (succ/total)*100 : 0) + '%';
-  const timeStr = `${String(data.grab_hour).padStart(2,'0')}:${String(data.grab_minute).padStart(2,'0')}:${String(data.grab_second).padStart(2,'0')}`;
-  document.getElementById('cfgTime').textContent = timeStr;
-  document.getElementById('cfgPre').textContent = (data.pre_start_sec || 10) + ' 秒前开始';
-  const endStr = `${String(data.end_hour||0).padStart(2,'0')}:${String(data.end_minute||0).padStart(2,'0')}:${String(data.end_second||30).padStart(2,'0')}`;
-  document.getElementById('cfgEnd').textContent = endStr;
-  document.getElementById('cfgThreads').textContent = (data.thread_count || 5) + ' 线程';
-  const uptime = Math.floor((Date.now()/1000) - data.uptime_start);
-  const h = Math.floor(uptime/3600), m = Math.floor((uptime%3600)/60);
-  document.getElementById('cfgUptime').textContent = `${h}时${m}分`;
   // 存储全局配置 (供 fillDefaultConfig 使用)
   window._globalGrabH = data.grab_hour;
   window._globalGrabM = data.grab_minute;
@@ -1130,17 +1134,130 @@ async function saveLogMaxCount() {
 }
 
 function updateCountdown(data) {
-  window._grabHour = data.grab_hour;
-  window._grabMin = data.grab_minute;
-  window._grabSec = data.grab_second;
+  // 【修复】计算所有账号中最近的下一个抢券时间
+  const accounts = data.accounts || [];
+  const enabledAccounts = accounts.filter(a => a.enabled !== false);
+  
+  let nearestTarget = null;
+  let nearestAccLabel = '全局默认';
+  
+  if (enabledAccounts.length > 0) {
+    // 有启用账号时，找最近的下一个抢券时间
+    const offset = window._timeOffset || 0;
+    const correctedNow = Date.now() + offset;
+    
+    for (const acc of enabledAccounts) {
+      const cfg = acc.config || {};
+      const gh = cfg.grab_hour ?? data.grab_hour;
+      const gm = cfg.grab_minute ?? data.grab_minute;
+      const gs = cfg.grab_second ?? data.grab_second;
+      const preSec = cfg.pre_start_sec ?? 10;
+      
+      // 计算该账号的抢券开始时间（提前preSec秒）
+      const target = new Date(correctedNow);
+      target.setHours(gh, gm, gs - preSec, 0);
+      
+      // 如果已经过了今天的时间，推到明天
+      if (correctedNow >= target.getTime()) {
+        target.setDate(target.getDate() + 1);
+      }
+      
+      // 找最近的一个
+      if (nearestTarget === null || target.getTime() < nearestTarget.getTime()) {
+        nearestTarget = target;
+        nearestAccLabel = acc.label || `账号${acc.id}`;
+      }
+    }
+  } else {
+    // 没有启用账号，使用全局默认时间
+    nearestTarget = new Date();
+    nearestTarget.setHours(data.grab_hour, data.grab_minute, data.grab_second, 0);
+    const now = new Date();
+    if (now >= nearestTarget) nearestTarget.setDate(nearestTarget.getDate() + 1);
+  }
+  
+  // 更新全局变量供tickCountdown使用
+  window._grabHour = nearestTarget.getHours();
+  window._grabMin = nearestTarget.getMinutes();
+  window._grabSec = nearestTarget.getSeconds();
   window._timeOffset = (data.sync && data.sync.offset_ms) ? data.sync.offset_ms : (data.ntp_offset_ms || 0);
   window._grabStatus = data.status || 'idle';
-  const target = new Date();
-  target.setHours(data.grab_hour, data.grab_minute, data.grab_second, 0);
-  const now = new Date();
-  if (now >= target) target.setDate(target.getDate() + 1);
-  const dateStr = target.toLocaleDateString('zh-CN', {month:'long', day:'numeric'});
-  document.getElementById('countdownLabel').textContent = `${dateStr} ${data.next_grab} (PDD服务器时间)`;
+  
+  // 更新日期标签
+  const dateStr = nearestTarget.toLocaleDateString('zh-CN', {month:'long', day:'numeric'});
+  const timeStr = `${String(window._grabHour).padStart(2,'0')}:${String(window._grabMin).padStart(2,'0')}:${String(window._grabSec).padStart(2,'0')}`;
+  document.getElementById('countdownLabel').textContent = `${dateStr} ${timeStr} (${nearestAccLabel})`;
+}
+
+// 更新账号倒计时卡片
+function updateAccountTimers(accounts) {
+  const el = document.getElementById('accountTimers');
+  if (!el) return;
+  
+  // 过滤启用的账号
+  const enabledAccounts = (accounts || []).filter(a => a.enabled !== false);
+  
+  if (!enabledAccounts.length) {
+    el.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px;font-size:12px">无启用账号</div>';
+    return;
+  }
+  
+  // 获取当前时间偏移
+  const offset = window._timeOffset || 0;
+  const correctedNow = Date.now() + offset;
+  
+  // 计算每个账号的倒计时
+  const timers = enabledAccounts.map(acc => {
+    // 【修复】从config中读取账号自己的时间设置
+    const cfg = acc.config || {};
+    const gh = cfg.grab_hour ?? 0;
+    const gm = cfg.grab_minute ?? 0;
+    const gs = cfg.grab_second ?? 0;
+    const preSec = cfg.pre_start_sec ?? 10;
+    
+    // 计算抢券开始时间（提前preSec秒）
+    const target = new Date(correctedNow);
+    target.setHours(gh, gm, gs - preSec, 0);
+    if (correctedNow >= target.getTime()) target.setDate(target.getDate() + 1);
+    
+    const diff = target.getTime() - correctedNow;
+    const h = String(Math.floor(diff / 3600000)).padStart(2, '0');
+    const m = String(Math.floor((diff % 3600000) / 60000)).padStart(2, '0');
+    const s = String(Math.floor((diff % 60000) / 1000)).padStart(2, '0');
+    const ms = String(Math.floor(diff % 1000)).padStart(3, '0');
+    
+    // 检查是否可抢券（5/5天）
+    const signInDays = (acc.sign_in && acc.sign_in.finish_count) || 0;
+    const canGrab = signInDays >= 5;
+    
+    return {
+      label: acc.label || `账号${acc.id}`,
+      countdown: `${h}:${m}:${s}.${ms}`,
+      canGrab,
+      signInDays,
+      diff
+    };
+  });
+  
+  // 按倒计时排序（最近的在前）
+  timers.sort((a, b) => a.diff - b.diff);
+  
+  // 渲染HTML
+  el.innerHTML = timers.map(t => `
+    <div style="display:flex;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px">
+      <span style="flex:1;display:flex;align-items:center;gap:6px">
+        <span style="font-size:16px"></span>
+        <span style="font-weight:500">${t.label}</span>
+        <span style="font-size:11px;color:var(--text3)">${t.signInDays}/5天</span>
+      </span>
+      <span style="font-family:monospace;font-size:14px;font-weight:bold;color:${t.canGrab?'var(--green)':'var(--text3)'}">
+        ${t.countdown}
+      </span>
+      <span style="margin-left:8px;font-size:11px;color:${t.canGrab?'var(--green)':'var(--orange)'}">
+        ${t.canGrab?'✅':''}
+      </span>
+    </div>
+  `).join('');
 }
 
 // 毫秒级平滑倒计时 (requestAnimationFrame 驱动)
@@ -1186,13 +1303,27 @@ let _lastLogHtml = '';
 
 function makeLogHtml(logs) {
   if (!logs.length) return '<div style="text-align:center;color:var(--text3);padding:40px">暂无日志</div>';
-  return logs.slice().reverse().map(l => `
+  const showDetailed = document.getElementById('showDetailedLogs')?.checked || document.getElementById('showDetailedLogsFull')?.checked;
+  return logs.slice().reverse().map(l => {
+    // 判断是否为抢券请求日志
+    const isGrabRequest = l.message && (l.message.includes('POST /api/') || l.message.includes('线程-') || l.message.includes('已发'));
+    
+    let msgClass = 'log-level-' + l.level;
+    let msgContent = l.message;
+    
+    // 如果是抢券请求且开启了详细显示
+    if (isGrabRequest && showDetailed) {
+      // 解析并高亮显示
+      msgClass += ' log-grab-request';
+    }
+    
+    return `
     <div class="log-item">
       <span class="log-time">${l.time}</span>
       <span class="log-tag ${l.module}">${l.module}</span>
-      <span class="log-msg log-level-${l.level}">${l.message}</span>
+      <span class="log-msg ${msgClass}">${msgContent}</span>
     </div>
-  `).join('');
+  `}).join('');
 }
 
 // 滚动事件：用户往上滚→取消跟随；滚到底部→恢复跟随
@@ -1287,13 +1418,14 @@ async function poll() {
     const data = await r.json();
     updateDashboard(data.state);
     updateCountdown(data.state);
+    updateAccountTimers(data.state.accounts); // 更新账号倒计时
     updateLogs(data.logs);
     updateHistory(data.history);
     // 同步状态显示
     const syncEl = document.getElementById('syncStatus');
     if (syncEl && data.sync) {
       const s = data.sync;
-      const srcIcons = {pdd:'🎯', ntp:'🌐', local:'⚠️'};
+      const srcIcons = {pdd:'🎯', ntp:'🌐', local:'️'};
       const srcNames = {pdd:'PDD服务器', ntp:'NTP', local:'本地'};
       const icon = srcIcons[s.source] || '⚠️';
       const name = srcNames[s.source] || '本地';

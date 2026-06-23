@@ -90,6 +90,13 @@ COUPON_URL = os.getenv("COUPON_URL",
 ACCOUNTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pdd_accounts.json")
 TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pdd_token")  # 兼容旧文件
 
+# --- Token 预生成队列 ---
+TOKEN_QUEUE_SIZE = int(os.getenv("TOKEN_QUEUE_SIZE", "100"))  # 队列大小
+_TOKEN_QUEUE = None
+_TOKEN_QUEUE_LOCK = threading.Lock()
+_TOKEN_QUEUE_THREAD = None
+_TOKEN_QUEUE_STOP = threading.Event()
+
 # 北京时间时区
 BJT = timezone(timedelta(hours=8))
 
@@ -101,6 +108,7 @@ PDD_OFFSET = 0.0       # PDD 服务器与本地的偏移 (秒)
 NTP_OFFSET = 0.0       # NTP 偏移 (秒)
 TIME_SOURCE = "local"  # pdd / ntp / local
 OFFSET_HISTORY = []    # 偏移历史 [(timestamp_ms, offset_ms, rtt_ms), ...]
+OFFSET_HISTORY_LOCK = threading.Lock()  # 【修复】保护OFFSET_HISTORY的线程锁
 MAX_HISTORY = 100      # 最多保留 100 条
 SYNC_INTERVAL = 30     # 持续同步间隔 (秒)
 _sync_running = False
@@ -152,14 +160,15 @@ def get_pdd_server_offset(samples: int = 5) -> float:
         offset_ms, rtt_ms = _single_pdd_sample(cookies, user_id)
         if offset_ms is not None:
             offsets.append(offset_ms)
-            OFFSET_HISTORY.append((time.time() * 1000, offset_ms, rtt_ms))
+            with OFFSET_HISTORY_LOCK:
+                OFFSET_HISTORY.append((time.time() * 1000, offset_ms, rtt_ms))
+                if len(OFFSET_HISTORY) > MAX_HISTORY:
+                    OFFSET_HISTORY = OFFSET_HISTORY[-MAX_HISTORY:]
             logger.info(f"PDD 采样 #{i+1}: 偏移={offset_ms:+.1f}ms RTT={rtt_ms:.1f}ms")
         if i < samples - 1:
             time.sleep(0.3)
 
-    # 限制历史长度
-    if len(OFFSET_HISTORY) > MAX_HISTORY:
-        OFFSET_HISTORY = OFFSET_HISTORY[-MAX_HISTORY:]
+    # 限制历史长度（已在循环中处理，这里删除重复代码）
 
     if offsets:
         avg = sum(offsets) / len(offsets)
@@ -220,15 +229,15 @@ def _continuous_sync():
 
             offset_ms, rtt_ms = _single_pdd_sample(cookies, user_id)
             if offset_ms is not None:
-                OFFSET_HISTORY.append((time.time() * 1000, offset_ms, rtt_ms))
-                if len(OFFSET_HISTORY) > MAX_HISTORY:
-                    OFFSET_HISTORY = OFFSET_HISTORY[-MAX_HISTORY:]
-
-                # 用最近 10 次采样做平滑 (加权平均，越新权重越大)
-                recent = OFFSET_HISTORY[-10:]
-                weights = list(range(1, len(recent) + 1))
-                total_w = sum(weights)
-                smoothed = sum(o * w for (_, o, _), w in zip(recent, weights)) / total_w
+                with OFFSET_HISTORY_LOCK:
+                    OFFSET_HISTORY.append((time.time() * 1000, offset_ms, rtt_ms))
+                    if len(OFFSET_HISTORY) > MAX_HISTORY:
+                        OFFSET_HISTORY = OFFSET_HISTORY[-MAX_HISTORY:]
+                    # 用最近 10 次采样做平滑 (加权平均，越新权重越大)
+                    recent = OFFSET_HISTORY[-10:]
+                    weights = list(range(1, len(recent) + 1))
+                    total_w = sum(weights)
+                    smoothed = sum(o * w for (_, o, _), w in zip(recent, weights)) / total_w
                 PDD_OFFSET = smoothed / 1000.0
                 TIME_SOURCE = "pdd"
                 logger.info(f"[同步] 偏移={offset_ms:+.1f}ms RTT={rtt_ms:.1f}ms → 平滑={smoothed:+.2f}ms")
@@ -272,6 +281,96 @@ def get_sync_status() -> dict:
         "avg_rtt": sum(rtts) / len(rtts) if rtts else 0,
         "history": [(int(t), round(o, 2), round(r, 2)) for t, o, r in history],
     }
+
+
+# ============================================================
+# Token 预生成队列机制
+# ============================================================
+def _token_producer_thread():
+    """后台线程：持续生产 Token 填充队列"""
+    global _TOKEN_QUEUE, _TOKEN_QUEUE_STOP
+    from pdd_token import generate_anti_content
+    
+    logger.info(f"Token 生产者线程已启动 (队列大小={TOKEN_QUEUE_SIZE})")
+    
+    while not _TOKEN_QUEUE_STOP.is_set():
+        try:
+            with _TOKEN_QUEUE_LOCK:
+                queue_len = len(_TOKEN_QUEUE) if _TOKEN_QUEUE else 0
+            
+            # 如果队列不足，批量生成补充
+            if queue_len < TOKEN_QUEUE_SIZE // 2:
+                batch_size = TOKEN_QUEUE_SIZE - queue_len
+                server_time = int(time.time() * 1000 + get_time_offset() * 1000)
+                tokens = []
+                for i in range(batch_size):
+                    token = generate_anti_content(server_time + i)
+                    tokens.append(token)
+                
+                with _TOKEN_QUEUE_LOCK:
+                    if _TOKEN_QUEUE is None:
+                        _TOKEN_QUEUE = []
+                    _TOKEN_QUEUE.extend(tokens)
+                    queue_len = len(_TOKEN_QUEUE)
+                
+                logger.debug(f"Token 队列补充: +{batch_size} → {queue_len}/{TOKEN_QUEUE_SIZE}")
+            
+            time.sleep(0.1)  # 每100ms检查一次
+        except Exception as e:
+            logger.error(f"Token 生产异常: {e}")
+            time.sleep(1)
+
+
+def start_token_queue():
+    """启动 Token 预生成队列"""
+    global _TOKEN_QUEUE, _TOKEN_QUEUE_THREAD, _TOKEN_QUEUE_STOP
+    
+    with _TOKEN_QUEUE_LOCK:
+        if _TOKEN_QUEUE is not None:
+            return  # 已经启动
+        _TOKEN_QUEUE = []
+        _TOKEN_QUEUE_STOP.clear()
+    
+    _TOKEN_QUEUE_THREAD = threading.Thread(target=_token_producer_thread, daemon=True)
+    _TOKEN_QUEUE_THREAD.start()
+    logger.info("✓ Token 预生成队列已启动")
+
+
+def stop_token_queue():
+    """停止 Token 预生成队列"""
+    global _TOKEN_QUEUE, _TOKEN_QUEUE_THREAD, _TOKEN_QUEUE_STOP
+    
+    _TOKEN_QUEUE_STOP.set()
+    if _TOKEN_QUEUE_THREAD:
+        _TOKEN_QUEUE_THREAD.join(timeout=2)
+    
+    with _TOKEN_QUEUE_LOCK:
+        _TOKEN_QUEUE = None
+        _TOKEN_QUEUE_THREAD = None
+    
+    logger.info("✗ Token 预生成队列已停止")
+
+
+def get_token_from_queue() -> str:
+    """
+    从队列中获取一个 Token（非阻塞）。
+    如果队列为空，则实时生成并记录警告。
+    """
+    from pdd_token import generate_anti_content
+    
+    with _TOKEN_QUEUE_LOCK:
+        if _TOKEN_QUEUE and len(_TOKEN_QUEUE) > 0:
+            token = _TOKEN_QUEUE.pop(0)
+            queue_len = len(_TOKEN_QUEUE)
+            # 只在队列极低时警告（减少日志噪音）
+            if queue_len < TOKEN_QUEUE_SIZE // 10 and queue_len % 5 == 0:
+                logger.warning(f"⚠️ Token 队列不足: {queue_len}/{TOKEN_QUEUE_SIZE}")
+            return token
+    
+    # 队列为空，实时生成
+    logger.warning("Token 队列为空，实时生成")
+    server_time = int(time.time() * 1000 + get_time_offset() * 1000)
+    return generate_anti_content(server_time)
 
 
 def now_bjt() -> datetime:
@@ -439,14 +538,26 @@ _PDD_SIGN_URL = "https://mobile.yangkeduo.com/proxy/api/api/aurum/check_in/task/
 
 
 def _make_pdd_session(account: dict):
-    """为指定账号创建已认证的 PDD HTTP Session"""
+    """为指定账号创建已认证的 PDD HTTP Session（启用Keep-Alive）"""
     from pdd_token import generate_anti_content
     s = requests.Session()
+    
+    # 【核心优化】启用 TCP Keep-Alive，复用连接减少握手开销
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=10,  # 连接池大小
+        pool_maxsize=10,      # 最大连接数
+        max_retries=0         # 不自动重试（我们自己控制）
+    )
+    s.mount('https://', adapter)
+    s.mount('http://', adapter)
+    
     s.headers.update({
         "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
         "Referer": "https://mobile.yangkeduo.com/charge_sign_coupon.html?source=deposit",
         "Origin": "https://mobile.yangkeduo.com",
         "Content-Type": "application/json;charset=UTF-8",
+        # Keep-Alive 相关头
+        "Connection": "keep-alive",
     })
     # 添加 Access Token 到 Header（如果存在）
     token = account.get("access_token", "")
@@ -862,6 +973,45 @@ def run_grab_session():
 
         logger.info(f"{tag} 窗口: {start_time:%H:%M:%S} ~ {end_time:%H:%M:%S}")
 
+        # 【核心优化】抢券前1分钟开始高频时间同步（每秒1次）
+        high_freq_sync_start = start_time - timedelta(seconds=60)
+        high_freq_sync_stop = start_time - timedelta(seconds=10)  # 最后10秒停止，避免网络抖动
+        
+        def _high_freq_sync():
+            """高频时间同步线程（使用当前账号的Cookie）"""
+            global PDD_OFFSET, TIME_SOURCE
+            while True:
+                now_check = now_bjt()
+                if now_check >= high_freq_sync_stop:
+                    break  # 到达停止时间，退出
+                if now_check < high_freq_sync_start:
+                    time.sleep(1)  # 还没到开始时间，等待
+                    continue
+                try:
+                    # 【修复】使用当前账号的Cookie，而非全局load_token_data()
+                    if not cookies:
+                        time.sleep(1)
+                        continue
+                    offset_ms, rtt_ms = _single_pdd_sample(cookies, user_id)
+                    if offset_ms is not None:
+                        with OFFSET_HISTORY_LOCK:
+                            OFFSET_HISTORY.append((time.time() * 1000, offset_ms, rtt_ms))
+                            if len(OFFSET_HISTORY) > MAX_HISTORY:
+                                OFFSET_HISTORY = OFFSET_HISTORY[-MAX_HISTORY:]
+                            recent = OFFSET_HISTORY[-5:]  # 用最近5次做平滑
+                            weights = list(range(1, len(recent) + 1))
+                            total_w = sum(weights)
+                            smoothed = sum(o * w for (_, o, _), w in zip(recent, weights)) / total_w
+                        PDD_OFFSET = smoothed / 1000.0
+                        TIME_SOURCE = "pdd"
+                        logger.debug(f"[{acc_label}] 高频同步: 偏移={offset_ms:+.1f}ms → 平滑={smoothed:+.2f}ms")
+                except Exception as e:
+                    pass
+                time.sleep(1)  # 每1秒同步一次
+        
+        _sync_thread = _threading.Thread(target=_high_freq_sync, daemon=True)
+        _sync_thread.start()
+
         # 等待开始时间
         if not skip_wait:
             while True:
@@ -875,8 +1025,15 @@ def run_grab_session():
 
         logger.info(f"{tag} 开火! {now_bjt():%H:%M:%S.%f}")
 
-        # 创建 HTTP Session
+        # 【核心优化】创建 HTTP Session（启用Keep-Alive + 连接池）
         session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=t_count * 2,  # 每个线程2个连接
+            pool_maxsize=t_count * 2,
+            max_retries=0
+        )
+        session.mount('https://', adapter)
+        session.mount('http://', adapter)
         session.headers.update(base_headers)
         session.cookies.update(cookies)
 
@@ -886,14 +1043,16 @@ def run_grab_session():
         total_req = [0]
 
         def worker(tid):
-            """工作子线程"""
+            """工作子线程（含智能重试 + 超密集爆发）"""
             count = 0
+            consecutive_failures = 0  # 连续失败次数（用于指数退避）
+            burst_start_time = None   # 爆发期开始时间
+            
             while not stop_event.is_set() and not acc_success.is_set():
                 t0 = time.time()
                 try:
-                    anti_token = generate_anti_content(
-                        int(time.time() * 1000 + get_time_offset() * 1000)
-                    )
+                    # 【核心优化】从预生成队列获取 Token（零延迟）
+                    anti_token = get_token_from_queue()
                     h = {"anti-content": anti_token}
                     payload = {
                         "request_source": 1,
@@ -907,17 +1066,46 @@ def run_grab_session():
                     with r_lock:
                         results.append({"idx": count, "thread": tid, "data": data, "elapsed": elapsed})
                         total_req[0] += 1
-                    # 检查是否成功
-                    if data.get("success") or data.get("error_code") == 0:
+                    
+                    # 【超密集爆发】记录爆发期开始时间
+                    if burst_start_time is None:
+                        burst_start_time = time.time()
+                    
+                    # 【智能重试】分析错误类型
+                    error_code = data.get("error_code", data.get("errorCode", 0))
+                    error_msg = data.get("errorMsg", "")
+                    
+                    if data.get("success") or error_code == 0:
                         logger.info(f"{tag} *** 抢券成功! *** 线程-{tid} #{count}")
                         acc_success.set()
                         stop_event.set()
                         return
-                    if count % 10 == 0:
-                        logger.info(f"{tag} 线程-{tid} 已发{count}个请求")
+                    elif error_code in [502, 503, 504, 'timeout'] or '超时' in error_msg or '网络' in error_msg:
+                        # 网络类错误 → 立即重试（可能是临时故障）
+                        consecutive_failures = 0
+                        if count % 10 == 0:
+                            logger.warning(f"{tag} 线程-{tid} 已发{count}个请求 (网络波动中...)")
+                    elif error_code in [6070001, 8070001]:
+                        # Cookie/Token过期 → 停止该账号的抢券
+                        logger.error(f"{tag} 线程-{tid} Cookie可能已过期 (code={error_code})，停止抢券")
+                        stop_event.set()
+                        return
+                    elif '库存不足' in error_msg or '已领完' in error_msg or '售罄' in error_msg:
+                        # 库存不足 → 停止所有线程
+                        logger.warning(f"{tag} 线程-{tid} 库存不足/已领完，停止抢券")
+                        stop_event.set()
+                        return
+                    else:
+                        # 其他错误 → 继续重试
+                        consecutive_failures += 1
+                        if count % 10 == 0:
+                            logger.warning(f"{tag} 线程-{tid} 已发{count}个请求 (错误码: {error_code})")
                 except Exception as e:
                     with r_lock:
                         total_req[0] += 1
+                    consecutive_failures += 1
+                    if count % 10 == 0:
+                        logger.error(f"{tag} 线程-{tid} 异常: {str(e)[:50]}")
 
         # 启动子线程
         threads = []
@@ -1065,9 +1253,11 @@ def calc_earliest_trigger() -> tuple:
             if m < 0:
                 m += 60
                 h = (h - 1) % 24
+        logger.info(f"[调度] 无启用账号，使用全局默认: {h:02d}:{m:02d}:{s:02d}")
         return h, m, s
 
     earliest_total_sec = None
+    earliest_acc_label = None
     for acc in accounts:
         cfg = acc.get("config", {})
         total_sec = (cfg.get("grab_hour", 0) * 3600 +
@@ -1078,10 +1268,12 @@ def calc_earliest_trigger() -> tuple:
             total_sec += 86400  # 跨天
         if earliest_total_sec is None or total_sec < earliest_total_sec:
             earliest_total_sec = total_sec
+            earliest_acc_label = acc.get("label", "未命名")
 
     h = (earliest_total_sec // 3600) % 24
     m = (earliest_total_sec % 3600) // 60
     s = earliest_total_sec % 60
+    logger.info(f"[调度] 最早触发账号: [{earliest_acc_label}], 时间: {h:02d}:{m:02d}:{s:02d} (总秒数={earliest_total_sec})")
     return h, m, s
 
 
@@ -1115,6 +1307,9 @@ def main():
     # 初始化时间同步
     sync_time()
     start_continuous_sync()
+    
+    # 启动 Token 预生成队列（核心优化）
+    start_token_queue()
 
     # 更新时间偏移到面板
     STATE["ntp_offset_ms"] = get_time_offset() * 1000
