@@ -1,4 +1,4 @@
-"""
+﻿"""
 拼多多签到券自动抢券脚本
 直接 HTTP API + Node.js anti_content Token 生成
 精确 PDD 服务器时间同步，毫秒级触发
@@ -578,7 +578,7 @@ def query_sign_in_status(account: dict) -> dict:
     session = _make_pdd_session(account)
 
     try:
-        anti_token = generate_anti_content(int(time.time() * 1000))
+        anti_token = generate_anti_content(int(time.time() * 1000 + get_time_offset() * 1000))
         session.headers["anti-content"] = anti_token
         # pdduid 放在 URL 参数中（与PDD真实页面一致）
         query_url = f"{_PDD_QUERY_URL}?pdduid={user_id}" if user_id else _PDD_QUERY_URL
@@ -635,7 +635,7 @@ def perform_sign_in(account: dict) -> dict:
 
     try:
         # 1. 先查询签到状态（获取动态 task_id）
-        anti_token = generate_anti_content(int(time.time() * 1000))
+        anti_token = generate_anti_content(int(time.time() * 1000 + get_time_offset() * 1000))
         session.headers["anti-content"] = anti_token
         query_url = f"{_PDD_QUERY_URL}?pdduid={user_id}" if user_id else _PDD_QUERY_URL
         query_body = {
@@ -679,12 +679,13 @@ def perform_sign_in(account: dict) -> dict:
 
         # 2. 执行签到 — 使用查询返回的动态 task_id
         task_id = result.get("task_id", "")
-        anti_token = generate_anti_content(int(time.time() * 1000))
+        anti_token = generate_anti_content(int(time.time() * 1000 + get_time_offset() * 1000))
         session.headers["anti-content"] = anti_token
         
         sign_body = {
             "request_source": 1,
             "anti_content": anti_token,
+            "task_id": task_id,
             "task_template_id": _PDD_TASK_TEMPLATE_ID,
         }
         if task_id:
@@ -849,6 +850,7 @@ def run_grab_session():
     4. 汇总结果
     """
     import threading as _threading
+    from collections import deque
     from pdd_token import generate_anti_content
 
     # 1. 时间同步
@@ -877,26 +879,31 @@ def run_grab_session():
             si["display_status"] = status["display_status"]
             si["can_sign"] = status["can_sign"]
             si["can_grab"] = status["can_grab"]
+            si["task_id"] = status.get("task_id", "")
             si["last_check"] = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S")
             update_account(acc["id"], sign_in=si)
         else:
             logger.warning(f"[{label}] 查询签到状态失败: {status.get('error')}，使用缓存数据")
 
-        # 检查是否可抢券
-        fc = si.get("finish_count", 0)
-        gc = si.get("gain_award_count", 0)
-        ds = si.get("display_status", 0)
-
-        if ds == 40:
-            logger.warning(f"[{label}] 已领取过优惠券，需重新签到5天才能抢券 (跳过)")
-            continue
-        elif fc >= 5:
-            # 签到满5天即可抢券 (不管ds=31还是gc<fc，都一样直接抢)
-            logger.info(f"[{label}] 签到{fc}天 ✅ 可抢券 (ds={ds}, gain={gc})")
-            eligible_accounts.append(acc)
+        # 检查是否可抢券：优先使用签到查询返回的 can_grab 标志，失败则用缓存状态兜底
+        if status["success"] and "can_grab" in status:
+            can_grab = status["can_grab"]
         else:
-            logger.warning(f"[{label}] 签到{fc}/5天，不满5天不可抢券 (跳过)")
+            fc = si.get("finish_count", 0)
+            ds = si.get("display_status", 0)
+            can_grab = (fc >= 5 and ds != 40)
+
+        if not can_grab:
+            fc = si.get("finish_count", 0)
+            ds = si.get("display_status", 0)
+            if ds == 40:
+                logger.warning(f"[{label}] 已领取过优惠券，需重新签到5天才能抢券 (跳过)")
+            else:
+                logger.warning(f"[{label}] 签到{fc}/5天，不可抢券 (跳过)")
             continue
+
+        logger.info(f"[{label}] 签到{si.get('finish_count', 0)}天 ✅ 可抢券 (ds={si.get('display_status', 0)}, gain={si.get('gain_award_count', 0)})")
+        eligible_accounts.append(acc)
 
     if not eligible_accounts:
         logger.error("没有可抢券的账号 (需签到满5天)")
@@ -941,6 +948,7 @@ def run_grab_session():
         acc_id = account["id"]
         acc_label = account.get("label", acc_id)
         cookies = account.get("cookies", {})
+        user_id = account.get("user_id", "") or account.get("cookies", {}).get("pdd_user_id", "")
         cfg = account.get("config", {})
 
         # 每个账号独立的成功标志
@@ -956,6 +964,8 @@ def run_grab_session():
         t_count = cfg.get("thread_count", 5)
 
         tag = f"[{acc_label}]"
+        task_id = os.getenv("PDD_TASK_ID", "") or acc.get("sign_in", {}).get("task_id", "") or "MT829143858423691176"
+        logger.info(f"{tag} 使用 task_id={task_id} (env PDD_TASK_ID={'已设置' if os.getenv('PDD_TASK_ID') else '未设置'}, sign_in_task_id={acc.get('sign_in', {}).get('task_id', '')})")
 
         # 计算时间窗口
         now = now_bjt()
@@ -1038,7 +1048,7 @@ def run_grab_session():
         session.cookies.update(cookies)
 
         stop_event = _threading.Event()
-        results = []
+        results = deque(maxlen=1000)
         r_lock = _threading.Lock()
         total_req = [0]
 
@@ -1057,6 +1067,7 @@ def run_grab_session():
                     payload = {
                         "request_source": 1,
                         "anti_content": anti_token,
+                        "task_id": task_id,
                         "task_template_id": task_template_id,
                     }
                     resp = session.post(api_url, json=payload, headers=h, timeout=3)
@@ -1075,7 +1086,10 @@ def run_grab_session():
                     error_code = data.get("error_code", data.get("errorCode", 0))
                     error_msg = data.get("errorMsg", "")
                     
+                    _data_str = json.dumps(data, ensure_ascii=False)[:100]
+                    logger.info(f"{tag} 线程-{tid} #{count} ({elapsed:.0f}ms) {resp.status_code} | {_data_str}")
                     if data.get("success") or error_code == 0:
+                        add_log("success", "grab", f"{tag} thread-{tid} success! (#{count})")
                         logger.info(f"{tag} *** 抢券成功! *** 线程-{tid} #{count}")
                         acc_success.set()
                         stop_event.set()
@@ -1085,14 +1099,17 @@ def run_grab_session():
                         consecutive_failures = 0
                         if count % 10 == 0:
                             logger.warning(f"{tag} 线程-{tid} 已发{count}个请求 (网络波动中...)")
+                            add_log("warn", "grab", f"{tag} thread-{tid} sent {count} reqs (network: {error_msg[:30]})")
                     elif error_code in [6070001, 8070001]:
                         # Cookie/Token过期 → 停止该账号的抢券
                         logger.error(f"{tag} 线程-{tid} Cookie可能已过期 (code={error_code})，停止抢券")
+                        add_log("error", "grab", f"{tag} thread-{tid} cookie expired code={error_code}")
                         stop_event.set()
                         return
                     elif '库存不足' in error_msg or '已领完' in error_msg or '售罄' in error_msg:
                         # 库存不足 → 停止所有线程
                         logger.warning(f"{tag} 线程-{tid} 库存不足/已领完，停止抢券")
+                        add_log("warn", "grab", f"{tag} thread-{tid} sold out")
                         stop_event.set()
                         return
                     else:
@@ -1100,12 +1117,14 @@ def run_grab_session():
                         consecutive_failures += 1
                         if count % 10 == 0:
                             logger.warning(f"{tag} 线程-{tid} 已发{count}个请求 (错误码: {error_code})")
+                            add_log("warn", "grab", f"{tag} thread-{tid} sent {count} reqs (error: {error_code})")
                 except Exception as e:
+                    elapsed = (time.time() - t0) * 1000
+                    count += 1
                     with r_lock:
                         total_req[0] += 1
                     consecutive_failures += 1
-                    if count % 10 == 0:
-                        logger.error(f"{tag} 线程-{tid} 异常: {str(e)[:50]}")
+                    logger.info(f"{tag} 线程-{tid} #{count} 失败 ({elapsed:.0f}ms): {str(e)[:50]}")
 
         # 启动子线程
         threads = []
@@ -1157,6 +1176,7 @@ def run_grab_session():
             detail = f"{tag} 无有效响应"
 
         logger.info(f"{tag} 结束: {total_req[0]}个请求 | {detail}")
+        add_log("success" if success else "warn", "grab", f"{tag} {detail} ({total_req[0]} reqs)")
         with results_lock:
             account_results[acc_id] = {
                 "success": success, "detail": detail, "total_requests": total_req[0]

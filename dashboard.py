@@ -1133,59 +1133,71 @@ async function saveLogMaxCount() {
   } catch(e) { showToast('请求失败: '+e.message, 'error'); }
 }
 
+// 【修复】辅助函数：用北京时间(H:M:S)计算下一个目标时间戳
+// 关键: Date.UTC 构造的是 UTC 时间，减去 8h 偏移转换为北京时间
+function calcTargetTimestamp(gh, gm, gs, correctedNow) {
+  // correctedNow 已代表北京时间，其 UTC 日期分量就是北京日期
+  const d = new Date(correctedNow);
+  const bjYear = d.getUTCFullYear();
+  const bjMonth = d.getUTCMonth();
+  const bjDay = d.getUTCDate();
+  
+  // 构造"今天北京时间 gh:gm:gs"的绝对时间戳
+  const targetMs = Date.UTC(bjYear, bjMonth, bjDay, gh, gm, gs, 0) - 8 * 3600000;
+  
+  if (correctedNow >= targetMs) {
+    return targetMs + 86400000; // 推到明天
+  }
+  return targetMs;
+}
+
 function updateCountdown(data) {
-  // 【修复】计算所有账号中最近的下一个抢券时间
+  // 【修复】计算所有账号中最近的下一个抢券时间 (全部用UTC时间戳)
   const accounts = data.accounts || [];
   const enabledAccounts = accounts.filter(a => a.enabled !== false);
   
-  let nearestTarget = null;
+  let nearestTargetMs = null;
   let nearestAccLabel = '全局默认';
   
+  // 先更新时间偏移
+  window._timeOffset = (data.sync && data.sync.offset_ms !== undefined) ? data.sync.offset_ms : (data.ntp_offset_ms || 0);
+  const offset = window._timeOffset;
+  const correctedNow = Date.now() + offset;
+  
   if (enabledAccounts.length > 0) {
-    // 有启用账号时，找最近的下一个抢券时间
-    const offset = window._timeOffset || 0;
-    const correctedNow = Date.now() + offset;
-    
     for (const acc of enabledAccounts) {
       const cfg = acc.config || {};
-      const gh = cfg.grab_hour ?? data.grab_hour;
-      const gm = cfg.grab_minute ?? data.grab_minute;
-      const gs = cfg.grab_second ?? data.grab_second;
-      const preSec = cfg.pre_start_sec ?? 10;
+      const gh = cfg.grab_hour !== undefined ? cfg.grab_hour : (data.grab_hour || 0);
+      const gm = cfg.grab_minute !== undefined ? cfg.grab_minute : (data.grab_minute || 0);
+      const gs = cfg.grab_second !== undefined ? cfg.grab_second : (data.grab_second || 0);
+      const preSec = cfg.pre_start_sec !== undefined ? cfg.pre_start_sec : 10;
       
-      // 计算该账号的抢券开始时间（提前preSec秒）
-      const target = new Date(correctedNow);
-      target.setHours(gh, gm, gs - preSec, 0);
+      let totalSec = gh * 3600 + gm * 60 + gs - preSec;
+      if (totalSec < 0) totalSec += 86400;
+      const tH = Math.floor(totalSec / 3600) % 24;
+      const tM = Math.floor((totalSec % 3600) / 60);
+      const tS = totalSec % 60;
       
-      // 如果已经过了今天的时间，推到明天
-      if (correctedNow >= target.getTime()) {
-        target.setDate(target.getDate() + 1);
-      }
+      const targetMs = calcTargetTimestamp(tH, tM, tS, correctedNow);
       
-      // 找最近的一个
-      if (nearestTarget === null || target.getTime() < nearestTarget.getTime()) {
-        nearestTarget = target;
+      if (nearestTargetMs === null || targetMs < nearestTargetMs) {
+        nearestTargetMs = targetMs;
         nearestAccLabel = acc.label || `账号${acc.id}`;
       }
     }
   } else {
-    // 没有启用账号，使用全局默认时间
-    nearestTarget = new Date();
-    nearestTarget.setHours(data.grab_hour, data.grab_minute, data.grab_second, 0);
-    const now = new Date();
-    if (now >= nearestTarget) nearestTarget.setDate(nearestTarget.getDate() + 1);
+    const gh = data.grab_hour || 0, gm = data.grab_minute || 0, gs = data.grab_second || 0;
+    nearestTargetMs = calcTargetTimestamp(gh, gm, gs, correctedNow);
   }
   
-  // 更新全局变量供tickCountdown使用
-  window._grabHour = nearestTarget.getHours();
-  window._grabMin = nearestTarget.getMinutes();
-  window._grabSec = nearestTarget.getSeconds();
-  window._timeOffset = (data.sync && data.sync.offset_ms) ? data.sync.offset_ms : (data.ntp_offset_ms || 0);
+  // 【关键修复】直接存储目标时间戳(ms)，tickCountdown直接使用，不再通过setHours
+  window._targetTime = nearestTargetMs;
   window._grabStatus = data.status || 'idle';
   
-  // 更新日期标签
-  const dateStr = nearestTarget.toLocaleDateString('zh-CN', {month:'long', day:'numeric'});
-  const timeStr = `${String(window._grabHour).padStart(2,'0')}:${String(window._grabMin).padStart(2,'0')}:${String(window._grabSec).padStart(2,'0')}`;
+  // 从目标时间戳还原北京时间显示
+  const targetDate = new Date(nearestTargetMs);
+  const dateStr = targetDate.toLocaleDateString('zh-CN', {month:'long', day:'numeric', timeZone:'Asia/Shanghai'});
+  const timeStr = targetDate.toLocaleTimeString('zh-CN', {hour12:false, timeZone:'Asia/Shanghai'});
   document.getElementById('countdownLabel').textContent = `${dateStr} ${timeStr} (${nearestAccLabel})`;
 }
 
@@ -1194,7 +1206,6 @@ function updateAccountTimers(accounts) {
   const el = document.getElementById('accountTimers');
   if (!el) return;
   
-  // 过滤启用的账号
   const enabledAccounts = (accounts || []).filter(a => a.enabled !== false);
   
   if (!enabledAccounts.length) {
@@ -1202,47 +1213,45 @@ function updateAccountTimers(accounts) {
     return;
   }
   
-  // 获取当前时间偏移
   const offset = window._timeOffset || 0;
   const correctedNow = Date.now() + offset;
   
-  // 计算每个账号的倒计时
   const timers = enabledAccounts.map(acc => {
-    // 【修复】从config中读取账号自己的时间设置
     const cfg = acc.config || {};
-    const gh = cfg.grab_hour ?? 0;
-    const gm = cfg.grab_minute ?? 0;
-    const gs = cfg.grab_second ?? 0;
-    const preSec = cfg.pre_start_sec ?? 10;
+    const gh = cfg.grab_hour !== undefined ? cfg.grab_hour : 0;
+    const gm = cfg.grab_minute !== undefined ? cfg.grab_minute : 0;
+    const gs = cfg.grab_second !== undefined ? cfg.grab_second : 0;
+    const preSec = cfg.pre_start_sec !== undefined ? cfg.pre_start_sec : 10;
     
-    // 计算抢券开始时间（提前preSec秒）
-    const target = new Date(correctedNow);
-    target.setHours(gh, gm, gs - preSec, 0);
-    if (correctedNow >= target.getTime()) target.setDate(target.getDate() + 1);
+    let totalSec = gh * 3600 + gm * 60 + gs - preSec;
+    if (totalSec < 0) totalSec += 86400;
+    const tH = Math.floor(totalSec / 3600) % 24;
+    const tM = Math.floor((totalSec % 3600) / 60);
+    const tS = totalSec % 60;
     
-    const diff = target.getTime() - correctedNow;
+    // 【修复】用UTC计算目标时间戳
+    const targetMs = calcTargetTimestamp(tH, tM, tS, correctedNow);
+    const diff = targetMs - correctedNow;
+    
     const h = String(Math.floor(diff / 3600000)).padStart(2, '0');
     const m = String(Math.floor((diff % 3600000) / 60000)).padStart(2, '0');
     const s = String(Math.floor((diff % 60000) / 1000)).padStart(2, '0');
     const ms = String(Math.floor(diff % 1000)).padStart(3, '0');
     
-    // 检查是否可抢券（5/5天）
     const signInDays = (acc.sign_in && acc.sign_in.finish_count) || 0;
     const canGrab = signInDays >= 5;
     
     return {
       label: acc.label || `账号${acc.id}`,
-      countdown: `${h}:${m}:${s}.${ms}`,
+      countdown: diff > 0 ? `${h}:${m}:${s}.${ms}` : '00:00:00.000',
       canGrab,
       signInDays,
       diff
     };
   });
   
-  // 按倒计时排序（最近的在前）
   timers.sort((a, b) => a.diff - b.diff);
   
-  // 渲染HTML
   el.innerHTML = timers.map(t => `
     <div style="display:flex;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px">
       <span style="flex:1;display:flex;align-items:center;gap:6px">
@@ -1261,38 +1270,42 @@ function updateAccountTimers(accounts) {
 }
 
 // 毫秒级平滑倒计时 (requestAnimationFrame 驱动)
+// 【修复】直接使用 updateCountdown 计算的目标时间戳，不再用 setHours
 function tickCountdown() {
   const el = document.getElementById('countdown');
   if (!el) { requestAnimationFrame(tickCountdown); return; }
 
-  const now = Date.now();
-  const offset = window._timeOffset || 0;
-  const correctedNow = now + offset;
   const status = window._grabStatus || 'idle';
 
-  const target = new Date();
-  target.setHours(window._grabHour || 0, window._grabMin || 0, window._grabSec || 0, 0);
-  if (Date.now() >= target.getTime()) target.setDate(target.getDate() + 1);
-
-  const diff = target.getTime() - correctedNow;
   if (status === 'grabbing') {
     el.textContent = '🔥 抢券中...';
     el.style.color = 'var(--red)';
   } else if (status === 'success') {
     el.textContent = '✅ 抢券成功!';
     el.style.color = 'var(--green)';
-  } else if (diff <= 0) {
-    el.textContent = '00:00:00.000';
-    el.style.color = 'var(--red)';
+  } else if (window._targetTime) {
+    // 【关键】直接使用存储的目标时间戳，无时区问题
+    const offset = window._timeOffset || 0;
+    const correctedNow = Date.now() + offset;
+    const diff = window._targetTime - correctedNow;
+    
+    if (diff <= 0) {
+      el.textContent = '00:00:00.000';
+      el.style.color = 'var(--red)';
+    } else {
+      const h = String(Math.floor(diff / 3600000)).padStart(2, '0');
+      const m = String(Math.floor((diff % 3600000) / 60000)).padStart(2, '0');
+      const s = String(Math.floor((diff % 60000) / 1000)).padStart(2, '0');
+      const ms = String(Math.floor(diff % 1000)).padStart(3, '0');
+      el.textContent = `${h}:${m}:${s}.${ms}`;
+      if (diff < 10000) el.style.color = 'var(--red)';
+      else if (diff < 60000) el.style.color = 'var(--orange)';
+      else el.style.color = '';
+    }
   } else {
-    const h = String(Math.floor(diff / 3600000)).padStart(2, '0');
-    const m = String(Math.floor((diff % 3600000) / 60000)).padStart(2, '0');
-    const s = String(Math.floor((diff % 60000) / 1000)).padStart(2, '0');
-    const ms = String(Math.floor(diff % 1000)).padStart(3, '0');
-    el.textContent = `${h}:${m}:${s}.${ms}`;
-    if (diff < 10000) el.style.color = 'var(--red)';
-    else if (diff < 60000) el.style.color = 'var(--orange)';
-    else el.style.color = '';
+    // poll 还没成功过，显示等待
+    el.textContent = '--:--:--.---';
+    el.style.color = '';
   }
   requestAnimationFrame(tickCountdown);
 }
@@ -1416,21 +1429,23 @@ async function poll() {
   try {
     const r = await fetch('/api/state');
     const data = await r.json();
-    updateDashboard(data.state);
-    updateCountdown(data.state);
-    updateAccountTimers(data.state.accounts); // 更新账号倒计时
-    updateLogs(data.logs);
-    updateHistory(data.history);
+    try { updateDashboard(data.state); } catch(e) { console.error('updateDashboard error:', e); }
+    try { updateCountdown(data.state); } catch(e) { console.error('updateCountdown error:', e); }
+    try { updateAccountTimers(data.state.accounts); } catch(e) { console.error('updateAccountTimers error:', e); }
+    try { updateLogs(data.logs); } catch(e) { console.error('updateLogs error:', e); }
+    try { updateHistory(data.history); } catch(e) { console.error('updateHistory error:', e); }
     // 同步状态显示
-    const syncEl = document.getElementById('syncStatus');
-    if (syncEl && data.sync) {
-      const s = data.sync;
-      const srcIcons = {pdd:'🎯', ntp:'🌐', local:'️'};
-      const srcNames = {pdd:'PDD服务器', ntp:'NTP', local:'本地'};
-      const icon = srcIcons[s.source] || '⚠️';
-      const name = srcNames[s.source] || '本地';
-      syncEl.innerHTML = `${icon} <b>${name}</b> | 偏移 <b style="color:${Math.abs(s.offset_ms)<100?'var(--green)':'var(--orange)'}">${s.offset_ms>=0?'+':''}${s.offset_ms.toFixed(2)}ms</b> | RTT ${s.last_rtt_ms.toFixed(0)}ms | ${s.samples}次采样 | 范围 ${s.min_offset.toFixed(1)}~${s.max_offset.toFixed(1)}ms`;
-    }
+    try {
+      const syncEl = document.getElementById('syncStatus');
+      if (syncEl && data.sync) {
+        const s = data.sync;
+        const srcIcons = {pdd:'🎯', ntp:'🌐', local:'️'};
+        const srcNames = {pdd:'PDD服务器', ntp:'NTP', local:'本地'};
+        const icon = srcIcons[s.source] || '⚠️';
+        const name = srcNames[s.source] || '本地';
+        syncEl.innerHTML = `${icon} <b>${name}</b> | 偏移 <b style="color:${Math.abs(s.offset_ms)<100?'var(--green)':'var(--orange)'}">${s.offset_ms>=0?'+':''}${s.offset_ms.toFixed(2)}ms</b> | RTT ${s.last_rtt_ms.toFixed(0)}ms | ${s.samples}次采样 | 范围 ${s.min_offset.toFixed(1)}~${s.max_offset.toFixed(1)}ms`;
+      }
+    } catch(e) { console.error('syncStatus error:', e); }
   } catch(e) { console.error('Poll error:', e); }
 }
 poll();
@@ -1611,6 +1626,8 @@ def api_test_grab_account():
             "Origin": "https://mobile.yangkeduo.com",
         }
         task_template_id = "1"
+        task_id = os.getenv("PDD_TASK_ID", "") or account.get("sign_in", {}).get("task_id", "") or "MT829143858423691176"
+        logger.info(f"[测试] [{label}] 使用 task_id={task_id}")
 
         add_log("info", "抢券", f"[{label}] 单账号测试抢券开始 ({t_count}线程，持续3秒)")
 
@@ -1635,6 +1652,7 @@ def api_test_grab_account():
                     payload = {
                         "request_source": 1,
                         "anti_content": anti_token,
+                        "task_id": task_id,
                         "task_template_id": task_template_id,
                     }
                     resp = session.post(api_url, json=payload, headers=h, timeout=3)
