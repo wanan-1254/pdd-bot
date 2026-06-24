@@ -75,6 +75,30 @@ def add_log(level: str, module: str, message: str):
     })
 
 
+def _get_eligible_queue_info():
+    """获取预筛选队列信息，供前端展示"""
+    try:
+        from main import _eligible_queue, _eligible_queue_time
+        items = []
+        for acc in (_eligible_queue or []):
+            si = acc.get("sign_in", {})
+            items.append({
+                "id": acc.get("id", ""),
+                "label": acc.get("label", "未命名"),
+                "finish_count": si.get("finish_count", 0),
+                "gain_award_count": si.get("gain_award_count", 0),
+                "display_status": si.get("display_status", 0),
+                "last_check": si.get("last_check", ""),
+            })
+        return {
+            "items": items,
+            "count": len(items),
+            "screen_time": _eligible_queue_time or "",
+        }
+    except Exception:
+        return {"items": [], "count": 0, "screen_time": ""}
+
+
 def add_history(success: bool, detail: str):
     """添加一条抢券历史"""
     HISTORY.append({
@@ -343,6 +367,15 @@ textarea.form-input { min-height: 100px; resize: vertical; font-family: monospac
           <h3>👥 账号抢券倒计时</h3>
           <div id="accountTimers" style="max-height:200px;overflow-y:auto">
             <div style="text-align:center;color:var(--text3);padding:20px;font-size:12px">加载中...</div>
+          </div>
+        </div>
+        <div class="big-card">
+          <h3 style="display:flex;justify-content:space-between;align-items:center">
+            <span>📋 预筛选队列 <span style="font-size:12px;color:var(--text3);font-weight:normal" id="queueCount">(0个)</span></span>
+            <button class="btn btn-primary" style="padding:4px 14px;font-size:12px" onclick="manualPreScreen()">🔍 立即筛选</button>
+          </h3>
+          <div id="eligibleQueue" style="max-height:200px;overflow-y:auto">
+            <div style="text-align:center;color:var(--text3);padding:20px;font-size:12px">队列暂无数据，点击"立即筛选"或等待23:50自动筛选</div>
           </div>
         </div>
       </div>
@@ -1201,6 +1234,66 @@ function updateCountdown(data) {
   document.getElementById('countdownLabel').textContent = `${dateStr} ${timeStr} (${nearestAccLabel})`;
 }
 
+// 更新预筛选队列展示
+function updateEligibleQueue(queue) {
+  const el = document.getElementById('eligibleQueue');
+  const countEl = document.getElementById('queueCount');
+  if (!el) return;
+
+  if (!queue || !queue.items || queue.items.length === 0) {
+    el.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px;font-size:12px">队列暂无数据，点击"立即筛选"或等待23:50自动筛选</div>';
+    if (countEl) countEl.textContent = '(0个)';
+    return;
+  }
+
+  if (countEl) countEl.textContent = `(${queue.items.length}个)`;
+
+  const screenTime = queue.screen_time || '';
+  let html = '';
+  if (screenTime) {
+    html += `<div style="padding:6px 10px;background:var(--bg);border-radius:6px;font-size:11px;color:var(--text3);margin-bottom:6px">筛选时间: ${screenTime}</div>`;
+  }
+
+  html += queue.items.map(item => {
+    const dsText = {0:'未开始',21:'进行中',31:'已完成',40:'已领取'}[item.display_status] || item.display_status;
+    return `
+      <div style="display:flex;align-items:center;padding:8px 10px;border-bottom:1px solid var(--border);font-size:13px">
+        <span style="flex:1;display:flex;align-items:center;gap:6px">
+          <span style="font-weight:600">${item.label}</span>
+          <span style="font-size:11px;color:var(--text3)">${dsText}</span>
+        </span>
+        <span style="font-size:12px;color:var(--text2)">
+          签到 <b style="color:var(--primary)">${item.finish_count}</b>/5
+          | 已领 <b>${item.gain_award_count}</b>
+        </span>
+      </div>`;
+  }).join('');
+
+  el.innerHTML = html;
+}
+
+// 手动触发预筛选
+async function manualPreScreen() {
+  try {
+    const btn = event.target;
+    btn.disabled = true;
+    btn.textContent = '筛选中...';
+    const r = await fetch('/api/pre-screen', {method:'POST'});
+    const data = await r.json();
+    if (data.success) {
+      showToast(data.message, 'success');
+      poll(); // 立即刷新
+    } else {
+      showToast('筛选失败: ' + (data.error || ''), 'error');
+    }
+  } catch(e) {
+    showToast('请求失败: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔍 立即筛选';
+  }
+}
+
 // 更新账号倒计时卡片
 function updateAccountTimers(accounts) {
   const el = document.getElementById('accountTimers');
@@ -1432,6 +1525,7 @@ async function poll() {
     try { updateDashboard(data.state); } catch(e) { console.error('updateDashboard error:', e); }
     try { updateCountdown(data.state); } catch(e) { console.error('updateCountdown error:', e); }
     try { updateAccountTimers(data.state.accounts); } catch(e) { console.error('updateAccountTimers error:', e); }
+    try { updateEligibleQueue(data.eligible_queue); } catch(e) { console.error('updateEligibleQueue error:', e); }
     try { updateLogs(data.logs); } catch(e) { console.error('updateLogs error:', e); }
     try { updateHistory(data.history); } catch(e) { console.error('updateHistory error:', e); }
     // 同步状态显示
@@ -1497,6 +1591,7 @@ def api_state():
         "sync": sync_status,
         "logs": list(LOGS),
         "history": list(HISTORY),
+        "eligible_queue": _get_eligible_queue_info(),
     })
 
 
@@ -1543,6 +1638,28 @@ def api_save_config():
 
         return jsonify({"success": True})
     except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+# ============================================================
+# API: 手动预筛选
+# ============================================================
+@app.route("/api/pre-screen", methods=["POST"])
+@login_required
+def api_pre_screen():
+    """手动触发一次预筛选"""
+    try:
+        from main import pre_screen_accounts
+        pre_screen_accounts()
+        from main import _eligible_queue, _eligible_queue_time
+        return jsonify({
+            "success": True,
+            "count": len(_eligible_queue or []),
+            "screen_time": _eligible_queue_time or "",
+            "message": f"预筛选完成，{len(_eligible_queue or [])} 个账号入队",
+        })
+    except Exception as e:
+        add_log("error", "预筛选", f"手动预筛选失败: {e}")
         return jsonify({"success": False, "error": str(e)})
 
 
