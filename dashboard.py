@@ -1627,7 +1627,7 @@ def api_test_grab_account():
         }
         task_template_id = "1"
         task_id = os.getenv("PDD_TASK_ID", "") or account.get("sign_in", {}).get("task_id", "") or "MT829143858423691176"
-        logger.info(f"[测试] [{label}] 使用 task_id={task_id}")
+        add_log("info", "测试", f"[{label}] 使用 task_id={task_id}")
 
         add_log("info", "抢券", f"[{label}] 单账号测试抢券开始 ({t_count}线程，持续3秒)")
 

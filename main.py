@@ -575,6 +575,7 @@ def query_sign_in_status(account: dict) -> dict:
     """
     from pdd_token import generate_anti_content
     user_id = account.get("user_id", "") or account.get("cookies", {}).get("pdd_user_id", "")
+    label = account.get("label", user_id or "?")
     session = _make_pdd_session(account)
 
     try:
@@ -582,12 +583,15 @@ def query_sign_in_status(account: dict) -> dict:
         session.headers["anti-content"] = anti_token
         # pdduid 放在 URL 参数中（与PDD真实页面一致）
         query_url = f"{_PDD_QUERY_URL}?pdduid={user_id}" if user_id else _PDD_QUERY_URL
-        resp = session.post(query_url, json={
+        query_body = {
             "request_source": 1,
             "anti_content": anti_token,
             "task_template_id": _PDD_TASK_TEMPLATE_ID,
             "pdduid": user_id,
-        }, timeout=10)
+        }
+        logger.info(f"[签到查询] [{label}] 请求: {query_url}, body={query_body}")
+        resp = session.post(query_url, json=query_body, timeout=10)
+        logger.info(f"[签到查询] [{label}] 响应 status={resp.status_code}, text={resp.text[:500]}")
 
         data = resp.json()
         if not data.get("success"):
@@ -893,7 +897,11 @@ def run_grab_session():
             ds = si.get("display_status", 0)
             can_grab = (fc >= 5 and ds != 40)
 
-        if not can_grab:
+        # 默认启用强制抢券模式：即使签到不满5天也尝试抢券（兼容旧版行为）
+        # 如需严格检查，设置环境变量 PDD_FORCE_GRAB=false
+        force_grab = os.getenv("PDD_FORCE_GRAB", "true").lower() != "false"
+
+        if not can_grab and not force_grab:
             fc = si.get("finish_count", 0)
             ds = si.get("display_status", 0)
             if ds == 40:
@@ -902,7 +910,10 @@ def run_grab_session():
                 logger.warning(f"[{label}] 签到{fc}/5天，不可抢券 (跳过)")
             continue
 
-        logger.info(f"[{label}] 签到{si.get('finish_count', 0)}天 ✅ 可抢券 (ds={si.get('display_status', 0)}, gain={si.get('gain_award_count', 0)})")
+        if not can_grab and force_grab:
+            logger.warning(f"[{label}] 签到{si.get('finish_count', 0)}/5天，但强制抢券模式已启用，继续尝试")
+        else:
+            logger.info(f"[{label}] 签到{si.get('finish_count', 0)}天 ✅ 可抢券 (ds={si.get('display_status', 0)}, gain={si.get('gain_award_count', 0)})")
         eligible_accounts.append(acc)
 
     if not eligible_accounts:
