@@ -1274,15 +1274,15 @@ function updateEligibleQueue(queue) {
 
 // 手动触发预筛选
 async function manualPreScreen() {
+  const btn = document.querySelector('button[onclick="manualPreScreen()"]');
+  if (!btn || btn.disabled) return;
   try {
-    const btn = event.target;
     btn.disabled = true;
     btn.textContent = '筛选中...';
     const r = await fetch('/api/pre-screen', {method:'POST'});
     const data = await r.json();
     if (data.success) {
       showToast(data.message, 'success');
-      poll(); // 立即刷新
     } else {
       showToast('筛选失败: ' + (data.error || ''), 'error');
     }
@@ -1647,20 +1647,29 @@ def api_save_config():
 @app.route("/api/pre-screen", methods=["POST"])
 @login_required
 def api_pre_screen():
-    """手动触发一次预筛选"""
-    try:
-        from main import pre_screen_accounts
-        pre_screen_accounts()
-        from main import _eligible_queue, _eligible_queue_time
-        return jsonify({
-            "success": True,
-            "count": len(_eligible_queue or []),
-            "screen_time": _eligible_queue_time or "",
-            "message": f"预筛选完成，{len(_eligible_queue or [])} 个账号入队",
-        })
-    except Exception as e:
-        add_log("error", "预筛选", f"手动预筛选失败: {e}")
-        return jsonify({"success": False, "error": str(e)})
+    """手动触发一次预筛选（后台执行，立即返回）"""
+    import threading as _t
+
+    # 检查是否正在筛选
+    if getattr(api_pre_screen, '_running', False):
+        return jsonify({"success": False, "error": "筛选正在进行中，请等待完成"})
+
+    def _run():
+        api_pre_screen._running = True
+        try:
+            from main import pre_screen_accounts
+            pre_screen_accounts()
+        except Exception as e:
+            add_log("error", "预筛选", f"手动预筛选失败: {e}")
+        finally:
+            api_pre_screen._running = False
+
+    api_pre_screen._running = True
+    _t.Thread(target=_run, daemon=True).start()
+    return jsonify({
+        "success": True,
+        "message": "筛选已启动，请查看日志和队列刷新",
+    })
 
 
 # ============================================================
