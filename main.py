@@ -97,6 +97,15 @@ _TOKEN_QUEUE_LOCK = threading.Lock()
 _TOKEN_QUEUE_THREAD = None
 _TOKEN_QUEUE_STOP = threading.Event()
 
+# --- 预筛选队列 ---
+# 抢券前提前跑一轮筛选，把符合条件的账号放进队列
+# 凌晨抢券时直接从队列取，不再临时查询
+PRE_SCREEN_HOUR = int(os.getenv("PRE_SCREEN_HOUR", "23"))    # 预筛选小时
+PRE_SCREEN_MINUTE = int(os.getenv("PRE_SCREEN_MINUTE", "50")) # 预筛选分钟
+_eligible_queue = []          # 预筛选后的可抢券账号列表
+_eligible_queue_lock = threading.Lock()
+_eligible_queue_time = None   # 上次预筛选时间
+
 # 北京时间时区
 BJT = timezone(timedelta(hours=8))
 
@@ -845,40 +854,34 @@ def auto_query_all_sign_in():
 # ============================================================
 # Playwright 抢券核心
 # ============================================================
-def run_grab_session():
+
+def pre_screen_accounts():
     """
-    抢券流程 (预筛选 + 队列暂存 + 精准触发):
-    1. 时间同步 + 加载所有启用账号
-    2. 预筛选: 查询每个账号签到状态，筛出满足条件的账号
-    3. 队列暂存: 满足条件的账号排入执行队列，不满足的直接跳过
-    4. 精准触发: 到达抢券时间点，只对队列中的账号发起抢券请求
+    预筛选: 提前查询所有账号签到状态，把符合条件的放入队列。
+    筛选条件:
+      1. 签到满5天 (finish_count >= 5)
+      2. 当天未领取过 (display_status != 40)
+    抢券时直接从队列取，不再临时查询。
     """
-    import threading as _threading
-    from collections import deque
+    global _eligible_queue, _eligible_queue_time
     from pdd_token import generate_anti_content
 
-    # 1. 时间同步
-    sync_time()
-    logger.info(f"时间源: {TIME_SOURCE} | 偏移: {get_time_offset()*1000:+.2f}ms")
+    logger.info("=" * 55)
+    logger.info("【预筛选】开始扫描所有账号签到状态...")
+    add_log("info", "预筛选", "开始扫描所有账号签到状态")
 
-    # 2. 加载启用账号
     accounts = get_enabled_accounts()
     if not accounts:
-        logger.error("没有启用的账号")
-        STATE["status"] = "failed"
-        add_history(False, "没有启用的账号")
+        logger.error("【预筛选】没有启用的账号")
+        add_log("error", "预筛选", "没有启用的账号")
         return
 
-    # ============================================================
-    # 3. 预筛选阶段: 查询每个账号签到状态，筛出可抢券的账号
-    # ============================================================
-    logger.info("=" * 55)
-    logger.info("【预筛选】开始查询签到状态...")
-    eligible_accounts = []
+    eligible = []
     for acc in accounts:
         label = acc.get("label", acc["id"])
         status = query_sign_in_status(acc)
         si = acc.get("sign_in", {})
+
         if status["success"]:
             si["finish_count"] = status["finish_count"]
             si["gain_award_count"] = status["gain_award_count"]
@@ -888,38 +891,79 @@ def run_grab_session():
             si["task_id"] = status.get("task_id", "")
             si["last_check"] = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S")
             update_account(acc["id"], sign_in=si)
+
             fc = status["finish_count"]
             ds = status["display_status"]
             gc = status["gain_award_count"]
+
             if fc >= 5 and ds != 40:
-                logger.info(f"  ✅ [{label}] 签到{fc}天, 已领{gc}次 → 可抢券")
-                eligible_accounts.append(acc)
+                logger.info(f"  ✅ [{label}] 签到{fc}天, 已领{gc}次 → 入队")
+                eligible.append(acc)
             elif ds == 40:
                 logger.warning(f"  ❌ [{label}] 已领取过优惠券，跳过")
             else:
                 logger.warning(f"  ❌ [{label}] 签到{fc}/5天，不满5天，跳过")
         else:
-            # 查询失败时用缓存数据兜底
+            # 查询失败用缓存兜底
             fc = si.get("finish_count", 0)
             ds = si.get("display_status", 0)
             logger.warning(f"  ⚠️ [{label}] 查询失败: {status.get('error')}，用缓存(签到{fc}天)")
             if fc >= 5 and ds != 40:
-                logger.info(f"  ✅ [{label}] 缓存签到{fc}天 → 可抢券(缓存)")
-                eligible_accounts.append(acc)
+                logger.info(f"  ✅ [{label}] 缓存签到{fc}天 → 入队(缓存)")
+                eligible.append(acc)
             else:
                 logger.warning(f"  ❌ [{label}] 缓存签到{fc}/5天，跳过")
 
-    logger.info(f"【预筛选完成】{len(eligible_accounts)}/{len(accounts)} 个账号可抢券")
-    logger.info("=" * 55)
+    with _eligible_queue_lock:
+        _eligible_queue = eligible
+        _eligible_queue_time = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S")
 
-    if not eligible_accounts:
+    logger.info(f"【预筛选完成】{len(eligible)}/{len(accounts)} 个账号可抢券 → 已入队")
+    logger.info("=" * 55)
+    add_log("info", "预筛选", f"完成: {len(eligible)}/{len(accounts)} 个账号入队")
+
+    # 更新面板状态
+    STATE["status"] = "waiting"
+
+
+def get_eligible_queue():
+    """获取预筛选队列，如果队列为空则当场跑一次预筛选"""
+    global _eligible_queue
+    with _eligible_queue_lock:
+        if _eligible_queue:
+            logger.info(f"使用预筛选队列: {len(_eligible_queue)} 个账号 (筛选时间: {_eligible_queue_time})")
+            return list(_eligible_queue)
+    # 队列为空，当场跑一次
+    logger.warning("预筛选队列为空，当场执行预筛选...")
+    pre_screen_accounts()
+    with _eligible_queue_lock:
+        return list(_eligible_queue)
+
+
+def run_grab_session():
+    """
+    抢券流程 (预筛选队列 + 精准触发):
+    1. 时间同步
+    2. 从预筛选队列获取可抢券账号（队列在抢券前由定时任务提前填充）
+    3. 到达抢券时间点，只对队列中的账号发起抢券请求
+    """
+    import threading as _threading
+    from collections import deque
+    from pdd_token import generate_anti_content
+
+    # 1. 时间同步
+    sync_time()
+    logger.info(f"时间源: {TIME_SOURCE} | 偏移: {get_time_offset()*1000:+.2f}ms")
+
+    # 2. 从预筛选队列获取可抢券账号
+    accounts = get_eligible_queue()
+    if not accounts:
         logger.error("没有可抢券的账号 (需签到满5天且未领取过)")
         STATE["status"] = "failed"
         add_history(False, "无可抢券账号")
         return
 
-    accounts = eligible_accounts
-    logger.info(f"可抢券账号: {len(accounts)} 个")
+    logger.info(f"可抢券账号: {len(accounts)} 个 (来自预筛选队列)")
 
     logger.info("=" * 55)
     logger.info(f"开始抢券流程 (多账号并发模式 | {len(accounts)} 个账号)")
@@ -1387,6 +1431,16 @@ def main():
             max_instances=1,
         )
         logger.info("签到状态查询已启用: 每 2 小时自动查询")
+
+        # 预筛选定时任务: 抢券前提前跑一轮筛选，把符合条件的账号放入队列
+        _scheduler.add_job(
+            pre_screen_accounts,
+            trigger=CronTrigger(hour=PRE_SCREEN_HOUR, minute=PRE_SCREEN_MINUTE, second=0, timezone=BJT),
+            id="pdd_pre_screen",
+            name="PDD预筛选",
+            max_instances=1,
+        )
+        logger.info(f"预筛选已启用: 每天 {PRE_SCREEN_HOUR:02d}:{PRE_SCREEN_MINUTE:02d} 执行 (抢券前提前筛选)")
 
         _scheduler.start()
         # 注册调度器到 dashboard，使配置保存时能更新时间
