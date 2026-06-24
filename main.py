@@ -847,11 +847,11 @@ def auto_query_all_sign_in():
 # ============================================================
 def run_grab_session():
     """
-    抢券流程 (多账号并发模式):
+    抢券流程 (预筛选 + 队列暂存 + 精准触发):
     1. 时间同步 + 加载所有启用账号
-    2. 每个账号独立线程，按各自配置的时间窗口抢券
-    3. 任一账号成功即停止所有线程
-    4. 汇总结果
+    2. 预筛选: 查询每个账号签到状态，筛出满足条件的账号
+    3. 队列暂存: 满足条件的账号排入执行队列，不满足的直接跳过
+    4. 精准触发: 到达抢券时间点，只对队列中的账号发起抢券请求
     """
     import threading as _threading
     from collections import deque
@@ -869,66 +869,53 @@ def run_grab_session():
         add_history(False, "没有启用的账号")
         return
 
-    # 签到状态查询（默认关闭，兼容旧版直接抢券行为）
-    # 如需启用，设置环境变量 PDD_QUERY_SIGN_IN=true
-    _query_sign_in = os.getenv("PDD_QUERY_SIGN_IN", "false").lower() == "true"
-
+    # ============================================================
+    # 3. 预筛选阶段: 查询每个账号签到状态，筛出可抢券的账号
+    # ============================================================
+    logger.info("=" * 55)
+    logger.info("【预筛选】开始查询签到状态...")
     eligible_accounts = []
-    if _query_sign_in:
-        # 检查签到状态，过滤除不可抢券的账号
-        for acc in accounts:
-            label = acc.get("label", acc["id"])
-            # 抢券前始终从 PDD 刷新最新签到状态
-            logger.info(f"[{label}] 查询签到状态...")
-            status = query_sign_in_status(acc)
-            si = acc.get("sign_in", {})
-            if status["success"]:
-                si["finish_count"] = status["finish_count"]
-                si["gain_award_count"] = status["gain_award_count"]
-                si["display_status"] = status["display_status"]
-                si["can_sign"] = status["can_sign"]
-                si["can_grab"] = status["can_grab"]
-                si["task_id"] = status.get("task_id", "")
-                si["last_check"] = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S")
-                update_account(acc["id"], sign_in=si)
+    for acc in accounts:
+        label = acc.get("label", acc["id"])
+        status = query_sign_in_status(acc)
+        si = acc.get("sign_in", {})
+        if status["success"]:
+            si["finish_count"] = status["finish_count"]
+            si["gain_award_count"] = status["gain_award_count"]
+            si["display_status"] = status["display_status"]
+            si["can_sign"] = status["can_sign"]
+            si["can_grab"] = status["can_grab"]
+            si["task_id"] = status.get("task_id", "")
+            si["last_check"] = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S")
+            update_account(acc["id"], sign_in=si)
+            fc = status["finish_count"]
+            ds = status["display_status"]
+            gc = status["gain_award_count"]
+            if fc >= 5 and ds != 40:
+                logger.info(f"  ✅ [{label}] 签到{fc}天, 已领{gc}次 → 可抢券")
+                eligible_accounts.append(acc)
+            elif ds == 40:
+                logger.warning(f"  ❌ [{label}] 已领取过优惠券，跳过")
             else:
-                logger.warning(f"[{label}] 查询签到状态失败: {status.get('error')}，使用缓存数据")
-
-            # 检查是否可抢券：优先使用签到查询返回的 can_grab 标志，失败则用缓存状态兜底
-            if status["success"] and "can_grab" in status:
-                can_grab = status["can_grab"]
+                logger.warning(f"  ❌ [{label}] 签到{fc}/5天，不满5天，跳过")
+        else:
+            # 查询失败时用缓存数据兜底
+            fc = si.get("finish_count", 0)
+            ds = si.get("display_status", 0)
+            logger.warning(f"  ⚠️ [{label}] 查询失败: {status.get('error')}，用缓存(签到{fc}天)")
+            if fc >= 5 and ds != 40:
+                logger.info(f"  ✅ [{label}] 缓存签到{fc}天 → 可抢券(缓存)")
+                eligible_accounts.append(acc)
             else:
-                fc = si.get("finish_count", 0)
-                ds = si.get("display_status", 0)
-                can_grab = (fc >= 5 and ds != 40)
+                logger.warning(f"  ❌ [{label}] 缓存签到{fc}/5天，跳过")
 
-            # 默认启用强制抢券模式：即使签到不满5天也尝试抢券（兼容旧版行为）
-            # 如需严格检查，设置环境变量 PDD_FORCE_GRAB=false
-            force_grab = os.getenv("PDD_FORCE_GRAB", "true").lower() != "false"
-
-            if not can_grab and not force_grab:
-                fc = si.get("finish_count", 0)
-                ds = si.get("display_status", 0)
-                if ds == 40:
-                    logger.warning(f"[{label}] 已领取过优惠券，需重新签到5天才能抢券 (跳过)")
-                else:
-                    logger.warning(f"[{label}] 签到{fc}/5天，不可抢券 (跳过)")
-                continue
-
-            if not can_grab and force_grab:
-                logger.warning(f"[{label}] 签到{si.get('finish_count', 0)}/5天，但强制抢券模式已启用，继续尝试")
-            else:
-                logger.info(f"[{label}] 签到{si.get('finish_count', 0)}天 ✅ 可抢券 (ds={si.get('display_status', 0)}, gain={si.get('gain_award_count', 0)})")
-            eligible_accounts.append(acc)
-    else:
-        # 默认：不查签到状态，直接全部账号抢券（与旧版一致）
-        eligible_accounts = accounts
-        logger.info(f"跳过签到状态查询，直接使用 {len(eligible_accounts)} 个账号抢券")
+    logger.info(f"【预筛选完成】{len(eligible_accounts)}/{len(accounts)} 个账号可抢券")
+    logger.info("=" * 55)
 
     if not eligible_accounts:
-        logger.error("没有可抢券的账号 (需签到满5天)")
+        logger.error("没有可抢券的账号 (需签到满5天且未领取过)")
         STATE["status"] = "failed"
-        add_history(False, "无可抢券账号(签到不满5天)")
+        add_history(False, "无可抢券账号")
         return
 
     accounts = eligible_accounts
@@ -1002,45 +989,6 @@ def run_grab_session():
             end_time += timedelta(days=1)
 
         logger.info(f"{tag} 窗口: {start_time:%H:%M:%S} ~ {end_time:%H:%M:%S}")
-
-        # 【核心优化】抢券前1分钟开始高频时间同步（每秒1次）
-        high_freq_sync_start = start_time - timedelta(seconds=60)
-        high_freq_sync_stop = start_time - timedelta(seconds=10)  # 最后10秒停止，避免网络抖动
-        
-        def _high_freq_sync():
-            """高频时间同步线程（使用当前账号的Cookie）"""
-            global PDD_OFFSET, TIME_SOURCE
-            while True:
-                now_check = now_bjt()
-                if now_check >= high_freq_sync_stop:
-                    break  # 到达停止时间，退出
-                if now_check < high_freq_sync_start:
-                    time.sleep(1)  # 还没到开始时间，等待
-                    continue
-                try:
-                    # 【修复】使用当前账号的Cookie，而非全局load_token_data()
-                    if not cookies:
-                        time.sleep(1)
-                        continue
-                    offset_ms, rtt_ms = _single_pdd_sample(cookies, user_id)
-                    if offset_ms is not None:
-                        with OFFSET_HISTORY_LOCK:
-                            OFFSET_HISTORY.append((time.time() * 1000, offset_ms, rtt_ms))
-                            if len(OFFSET_HISTORY) > MAX_HISTORY:
-                                OFFSET_HISTORY = OFFSET_HISTORY[-MAX_HISTORY:]
-                            recent = OFFSET_HISTORY[-5:]  # 用最近5次做平滑
-                            weights = list(range(1, len(recent) + 1))
-                            total_w = sum(weights)
-                            smoothed = sum(o * w for (_, o, _), w in zip(recent, weights)) / total_w
-                        PDD_OFFSET = smoothed / 1000.0
-                        TIME_SOURCE = "pdd"
-                        logger.debug(f"[{acc_label}] 高频同步: 偏移={offset_ms:+.1f}ms → 平滑={smoothed:+.2f}ms")
-                except Exception as e:
-                    pass
-                time.sleep(1)  # 每1秒同步一次
-        
-        _sync_thread = _threading.Thread(target=_high_freq_sync, daemon=True)
-        _sync_thread.start()
 
         # 等待开始时间
         if not skip_wait:
