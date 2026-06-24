@@ -861,7 +861,7 @@ def run_grab_session():
     sync_time()
     logger.info(f"时间源: {TIME_SOURCE} | 偏移: {get_time_offset()*1000:+.2f}ms")
 
-    # 2. 加载启用账号 + 检查签到资格
+    # 2. 加载启用账号
     accounts = get_enabled_accounts()
     if not accounts:
         logger.error("没有启用的账号")
@@ -869,52 +869,61 @@ def run_grab_session():
         add_history(False, "没有启用的账号")
         return
 
-    # 检查签到状态，过滤除不可抢券的账号
+    # 签到状态查询（默认关闭，兼容旧版直接抢券行为）
+    # 如需启用，设置环境变量 PDD_QUERY_SIGN_IN=true
+    _query_sign_in = os.getenv("PDD_QUERY_SIGN_IN", "false").lower() == "true"
+
     eligible_accounts = []
-    for acc in accounts:
-        label = acc.get("label", acc["id"])
-        # 抢券前始终从 PDD 刷新最新签到状态
-        logger.info(f"[{label}] 查询签到状态...")
-        status = query_sign_in_status(acc)
-        si = acc.get("sign_in", {})
-        if status["success"]:
-            si["finish_count"] = status["finish_count"]
-            si["gain_award_count"] = status["gain_award_count"]
-            si["display_status"] = status["display_status"]
-            si["can_sign"] = status["can_sign"]
-            si["can_grab"] = status["can_grab"]
-            si["task_id"] = status.get("task_id", "")
-            si["last_check"] = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S")
-            update_account(acc["id"], sign_in=si)
-        else:
-            logger.warning(f"[{label}] 查询签到状态失败: {status.get('error')}，使用缓存数据")
-
-        # 检查是否可抢券：优先使用签到查询返回的 can_grab 标志，失败则用缓存状态兜底
-        if status["success"] and "can_grab" in status:
-            can_grab = status["can_grab"]
-        else:
-            fc = si.get("finish_count", 0)
-            ds = si.get("display_status", 0)
-            can_grab = (fc >= 5 and ds != 40)
-
-        # 默认启用强制抢券模式：即使签到不满5天也尝试抢券（兼容旧版行为）
-        # 如需严格检查，设置环境变量 PDD_FORCE_GRAB=false
-        force_grab = os.getenv("PDD_FORCE_GRAB", "true").lower() != "false"
-
-        if not can_grab and not force_grab:
-            fc = si.get("finish_count", 0)
-            ds = si.get("display_status", 0)
-            if ds == 40:
-                logger.warning(f"[{label}] 已领取过优惠券，需重新签到5天才能抢券 (跳过)")
+    if _query_sign_in:
+        # 检查签到状态，过滤除不可抢券的账号
+        for acc in accounts:
+            label = acc.get("label", acc["id"])
+            # 抢券前始终从 PDD 刷新最新签到状态
+            logger.info(f"[{label}] 查询签到状态...")
+            status = query_sign_in_status(acc)
+            si = acc.get("sign_in", {})
+            if status["success"]:
+                si["finish_count"] = status["finish_count"]
+                si["gain_award_count"] = status["gain_award_count"]
+                si["display_status"] = status["display_status"]
+                si["can_sign"] = status["can_sign"]
+                si["can_grab"] = status["can_grab"]
+                si["task_id"] = status.get("task_id", "")
+                si["last_check"] = datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S")
+                update_account(acc["id"], sign_in=si)
             else:
-                logger.warning(f"[{label}] 签到{fc}/5天，不可抢券 (跳过)")
-            continue
+                logger.warning(f"[{label}] 查询签到状态失败: {status.get('error')}，使用缓存数据")
 
-        if not can_grab and force_grab:
-            logger.warning(f"[{label}] 签到{si.get('finish_count', 0)}/5天，但强制抢券模式已启用，继续尝试")
-        else:
-            logger.info(f"[{label}] 签到{si.get('finish_count', 0)}天 ✅ 可抢券 (ds={si.get('display_status', 0)}, gain={si.get('gain_award_count', 0)})")
-        eligible_accounts.append(acc)
+            # 检查是否可抢券：优先使用签到查询返回的 can_grab 标志，失败则用缓存状态兜底
+            if status["success"] and "can_grab" in status:
+                can_grab = status["can_grab"]
+            else:
+                fc = si.get("finish_count", 0)
+                ds = si.get("display_status", 0)
+                can_grab = (fc >= 5 and ds != 40)
+
+            # 默认启用强制抢券模式：即使签到不满5天也尝试抢券（兼容旧版行为）
+            # 如需严格检查，设置环境变量 PDD_FORCE_GRAB=false
+            force_grab = os.getenv("PDD_FORCE_GRAB", "true").lower() != "false"
+
+            if not can_grab and not force_grab:
+                fc = si.get("finish_count", 0)
+                ds = si.get("display_status", 0)
+                if ds == 40:
+                    logger.warning(f"[{label}] 已领取过优惠券，需重新签到5天才能抢券 (跳过)")
+                else:
+                    logger.warning(f"[{label}] 签到{fc}/5天，不可抢券 (跳过)")
+                continue
+
+            if not can_grab and force_grab:
+                logger.warning(f"[{label}] 签到{si.get('finish_count', 0)}/5天，但强制抢券模式已启用，继续尝试")
+            else:
+                logger.info(f"[{label}] 签到{si.get('finish_count', 0)}天 ✅ 可抢券 (ds={si.get('display_status', 0)}, gain={si.get('gain_award_count', 0)})")
+            eligible_accounts.append(acc)
+    else:
+        # 默认：不查签到状态，直接全部账号抢券（与旧版一致）
+        eligible_accounts = accounts
+        logger.info(f"跳过签到状态查询，直接使用 {len(eligible_accounts)} 个账号抢券")
 
     if not eligible_accounts:
         logger.error("没有可抢券的账号 (需签到满5天)")
@@ -1072,8 +1081,10 @@ def run_grab_session():
             while not stop_event.is_set() and not acc_success.is_set():
                 t0 = time.time()
                 try:
-                    # 【核心优化】从预生成队列获取 Token（零延迟）
-                    anti_token = get_token_from_queue()
+                    # 【核心】每次请求实时生成 Token（与旧版一致，避免队列token时间戳过时）
+                    anti_token = generate_anti_content(
+                        int(time.time() * 1000 + get_time_offset() * 1000)
+                    )
                     h = {"anti-content": anti_token}
                     payload = {
                         "request_source": 1,
